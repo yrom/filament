@@ -117,47 +117,6 @@ static void uploadCallback(void* buffer, size_t size, void* user) {
     delete event;
 }
 
-void importSkins(const cgltf_data* gltf, const NodeMap& nodeMap, SkinVector& dstSkins) {
-    dstSkins.resize(gltf->skins_count);
-    for (cgltf_size i = 0, len = gltf->nodes_count; i < len; ++i) {
-        const cgltf_node& node = gltf->nodes[i];
-        if (node.skin) {
-            int skinIndex = node.skin - &gltf->skins[0];
-            Entity entity = nodeMap.at(&node);
-            dstSkins[skinIndex].targets.insert(entity);
-        }
-    }
-    for (cgltf_size i = 0, len = gltf->skins_count; i < len; ++i) {
-        Skin& dstSkin = dstSkins[i];
-        const cgltf_skin& srcSkin = gltf->skins[i];
-        if (srcSkin.name) {
-            dstSkin.name = CString(srcSkin.name);
-        }
-
-        // Build a list of transformables for this skin, one for each joint.
-        dstSkin.joints = FixedCapacityVector<Entity>(srcSkin.joints_count);
-        for (cgltf_size i = 0, len = srcSkin.joints_count; i < len; ++i) {
-            auto iter = nodeMap.find(srcSkin.joints[i]);
-            assert_invariant(iter != nodeMap.end());
-            dstSkin.joints[i] = iter->second;
-        }
-
-        // Retain a copy of the inverse bind matrices because the source blob could be evicted later.
-        const cgltf_accessor* srcMatrices = srcSkin.inverse_bind_matrices;
-        dstSkin.inverseBindMatrices = FixedCapacityVector<mat4f>(srcSkin.joints_count);
-        if (srcMatrices) {
-            auto dstMatrices = (uint8_t*) dstSkin.inverseBindMatrices.data();
-            uint8_t* bytes = (uint8_t*) srcMatrices->buffer_view->buffer->data;
-            if (!bytes) {
-                slog.w << "Empty animation buffer, have resources been loaded yet?" << io::endl;
-                continue;
-            }
-            auto srcBuffer = (void*) (bytes + srcMatrices->offset + srcMatrices->buffer_view->offset);
-            memcpy(dstMatrices, srcBuffer, srcSkin.joints_count * sizeof(mat4f));
-        }
-    }
-}
-
 static void convertBytesToShorts(uint16_t* dst, const uint8_t* src, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         dst[i] = src[i];
@@ -433,19 +392,12 @@ bool ResourceLoader::loadResources(FFilamentAsset* asset, bool async) {
     // tangent generation.
     decodeDracoMeshes(asset);
 
-    // Normalize skinning weights, then "import" each skin into the asset by building a mapping of
-    // skins to their affected entities.
-    if (gltf->skins_count > 0) {
-        if (pImpl->mNormalizeSkinningWeights) {
-            normalizeSkinningWeights(asset);
-        }
-        // NOTE: This takes care of up-front instances, but dynamically added instances also
-        // need to import the skin data, which is done in AssetLoader.
-        for (FFilamentInstance* instance : asset->mInstances) {
-            importSkins(gltf, instance->nodeMap, instance->skins);
-        }
+    // Normalize skinning weights to 1.  Clients must opt in for this behavior.
+    if (gltf->skins_count > 0 &&  pImpl->mNormalizeSkinningWeights) {
+        normalizeSkinningWeights(asset);
     }
 
+    // If desired, replace the glTF-supplied min / max position attributes with computed values.
     if (pImpl->mRecomputeBoundingBoxes) {
         updateBoundingBoxes(asset);
     }
@@ -755,6 +707,8 @@ void ResourceLoader::Impl::computeTangents(FFilamentAsset* asset) {
         }
     }
     // Create a job description for morph targets.
+    // TODO: do not iterate over the nodemap; iterate over the cgltf hierarchy.
+    const cgltf_data* cgltf = asset->mSourceAsset->hierarchy;
     const NodeMap& nodeMap = asset->mInstances[0]->nodeMap;
     for (auto iter : nodeMap) {
         cgltf_node const* node = iter.first;
@@ -858,7 +812,6 @@ void ResourceLoader::updateBoundingBoxes(FFilamentAsset* asset) const {
     SYSTRACE_CALL();
     auto& rm = pImpl->mEngine->getRenderableManager();
     auto& tm = pImpl->mEngine->getTransformManager();
-    const NodeMap& nodeMap = asset->mInstances[0]->nodeMap;
 
     // The purpose of the root node is to give the client a place for custom transforms.
     // Since it is not part of the source model, it should be ignored when computing the
@@ -930,21 +883,30 @@ void ResourceLoader::updateBoundingBoxes(FFilamentAsset* asset) const {
         TransformManager::Instance transformable = tm.getInstance(prim.node);
         const mat4f inverseGlobalTransform = inverse(tm.getWorldTransform(transformable));
         for (size_t i = 0, n = verts.size(); i < n; i++) {
-            float3 point = verts[i];
             mat4f tmp = mat4f(0.0f);
             for (size_t j = 0; j < 4; j++) {
                 size_t jointIndex = joints[i][j];
                 Entity jointEntity = prim.skin->joints[jointIndex];
                 mat4f globalJointTransform = tm.getWorldTransform(tm.getInstance(jointEntity));
                 mat4f inverseBindMatrix = prim.skin->inverseBindMatrices[jointIndex];
-                tmp += weights[i][j] * globalJointTransform * inverseBindMatrix;
+                tmp += weights[i][j] *  globalJointTransform * inverseBindMatrix;
             }
-            mat4f skinMatrix = inverseGlobalTransform * tmp;
-            if (!pImpl->mNormalizeSkinningWeights) {
-                skinMatrix /= skinMatrix[3].w;
-            }
-            float3 skinnedPoint = (point.x * skinMatrix[0] +
-                    point.y * skinMatrix[1] + point.z * skinMatrix[2] + skinMatrix[3]).xyz;
+            const mat4f skinMatrix = inverseGlobalTransform * tmp;
+
+            const float3 point = verts[i];
+
+            // NOTE: Filament's vertex shader assumes that last row is [0,0,0,1]
+            // so we make the same assumption in the following transformation.
+
+            // NOTE: in the past there was a conditional "skinMatrix /= skinMatrix[3].w"
+            // from a 3P contributor, we removed this as its purpose was unclear.
+
+            const float3 skinnedPoint =
+                    point.x * skinMatrix[0].xyz +
+                    point.y * skinMatrix[1].xyz +
+                    point.z * skinMatrix[2].xyz +
+                    skinMatrix[3].xyz;
+
             aabb.min = min(aabb.min, skinnedPoint);
             aabb.max = max(aabb.max, skinnedPoint);
         }
@@ -953,6 +915,7 @@ void ResourceLoader::updateBoundingBoxes(FFilamentAsset* asset) const {
 
     // Collect all mesh primitives that we wish to find bounds for. For each mesh primitive, we also
     // collect the skin it is bound to (nullptr if not skinned) for bounds computation.
+    const NodeMap& nodeMap = asset->mInstances[0]->nodeMap;
     size_t primCount = 0;
     for (auto iter : nodeMap) {
         const cgltf_mesh* mesh = iter.first->mesh;

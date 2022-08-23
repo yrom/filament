@@ -63,8 +63,6 @@ namespace filament::gltfio {
 
 using SceneMask = NodeManager::SceneMask;
 
-void importSkins(const cgltf_data* gltf, const NodeMap& nodeMap, SkinVector& dstSkins);
-
 static const auto FREE_CALLBACK = [](void* mem, size_t, void*) { free(mem); };
 
 // Sometimes a glTF bufferview includes unused data at the end (e.g. in skinning.gltf) so we need to
@@ -88,6 +86,47 @@ static const char* getNodeName(const cgltf_node* node, const char* defaultNodeNa
     if (node->light && node->light->name) return node->light->name;
     if (node->camera && node->camera->name) return node->camera->name;
     return defaultNodeName;
+}
+
+static void importSkins(const cgltf_data* gltf, const NodeMap& nodeMap, SkinVector& dstSkins) {
+    dstSkins.resize(gltf->skins_count);
+    for (cgltf_size i = 0, len = gltf->nodes_count; i < len; ++i) {
+        const cgltf_node& node = gltf->nodes[i];
+        if (node.skin) {
+            int skinIndex = node.skin - &gltf->skins[0];
+            Entity entity = nodeMap.at(&node);
+            dstSkins[skinIndex].targets.insert(entity);
+        }
+    }
+    for (cgltf_size i = 0, len = gltf->skins_count; i < len; ++i) {
+        Skin& dstSkin = dstSkins[i];
+        const cgltf_skin& srcSkin = gltf->skins[i];
+        if (srcSkin.name) {
+            dstSkin.name = CString(srcSkin.name);
+        }
+
+        // Build a list of transformables for this skin, one for each joint.
+        dstSkin.joints = FixedCapacityVector<Entity>(srcSkin.joints_count);
+        for (cgltf_size i = 0, len = srcSkin.joints_count; i < len; ++i) {
+            auto iter = nodeMap.find(srcSkin.joints[i]);
+            assert_invariant(iter != nodeMap.end());
+            dstSkin.joints[i] = iter->second;
+        }
+
+        // Retain a copy of the inverse bind matrices because the source blob could be evicted later.
+        const cgltf_accessor* srcMatrices = srcSkin.inverse_bind_matrices;
+        dstSkin.inverseBindMatrices = FixedCapacityVector<mat4f>(srcSkin.joints_count);
+        if (srcMatrices) {
+            auto dstMatrices = (uint8_t*) dstSkin.inverseBindMatrices.data();
+            uint8_t* bytes = (uint8_t*) srcMatrices->buffer_view->buffer->data;
+            if (!bytes) {
+                slog.w << "Empty animation buffer, have resources been loaded yet?" << io::endl;
+                continue;
+            }
+            uint8_t* srcBuffer = bytes + srcMatrices->offset + srcMatrices->buffer_view->offset;
+            memcpy(dstMatrices, (void*) srcBuffer, srcSkin.joints_count * sizeof(mat4f));
+        }
+    }
 }
 
 struct FAssetLoader : public AssetLoader {
@@ -178,8 +217,6 @@ FFilamentAsset* FAssetLoader::createAsset(const uint8_t* bytes, uint32_t byteCou
 
 FFilamentAsset* FAssetLoader::createInstancedAsset(const uint8_t* bytes, uint32_t byteCount,
         FilamentInstance** instances, size_t numInstances) {
-    ASSERT_PRECONDITION(numInstances > 0, "Instance count must be 1 or more.");
-
     // This method can be used to load JSON or GLB. By using a default options struct, we are asking
     // cgltf to examine the magic identifier to determine which type of file is being loaded.
     cgltf_options options {};
@@ -230,9 +267,6 @@ FilamentInstance* FAssetLoader::createInstance(FFilamentAsset* primary) {
     }
     FFilamentInstance* instance = createInstance(primary, srcAsset);
 
-    // Import the skin data. This is normally done by ResourceLoader but dynamically created
-    // instances are a bit special.
-    importSkins(primary->mSourceAsset->hierarchy, instance->nodeMap, instance->skins);
     if (primary->mAnimator) {
         primary->mAnimator->addInstance(instance);
     }
@@ -373,6 +407,9 @@ FFilamentInstance* FAssetLoader::createInstance(FFilamentAsset* primary,
     for (const auto& pair : mRootNodes) {
         createEntity(srcAsset, pair.first, pair.second, instanceRoot, false, instance);
     }
+
+    importSkins(srcAsset, instance->nodeMap, instance->skins);
+
     return instance;
 }
 
