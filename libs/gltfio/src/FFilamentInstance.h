@@ -43,21 +43,6 @@ namespace filament::gltfio {
 struct FFilamentAsset;
 class Animator;
 
-struct Skin {
-    utils::CString name;
-
-    // The inverse bind matrices and joints arrays must have the same count. Each element
-    // corresponds to a single bone. We considered using the ECS to store these, but this would be
-    // complicated because a single node might be used as a bone in more than one skin, and its
-    // inverse bind matrix might be unique in each of these skins.
-    utils::FixedCapacityVector<math::mat4f> inverseBindMatrices; ///////////////////////////// TODO: this should be stored in the asset
-    utils::FixedCapacityVector<utils::Entity> joints;
-
-    // The set of all nodes that are influenced by this skin.
-    // This is initially gleaned from the glTF file using the "skin" attribute of each node.
-    tsl::robin_set<utils::Entity, utils::Entity::Hasher> targets;
-};
-
 struct VariantMapping {
     utils::Entity renderable;
     size_t primitiveIndex;
@@ -69,16 +54,26 @@ struct Variant {
     std::vector<VariantMapping> mappings;
 };
 
-using SkinVector = std::vector<Skin>;
 using NodeMap = tsl::robin_map<const cgltf_node*, utils::Entity>;
 
 struct FFilamentInstance : public FilamentInstance {
+
+    struct Skin {
+        // We considered using the ECS to store these, but this would be complicated because a
+        // single node might be used as a bone in more than one skin.
+        utils::FixedCapacityVector<utils::Entity> joints;
+
+        // The set of all nodes that are influenced by this skin.
+        // This is initially gleaned from the glTF file using the "skin" attribute of each node.
+        tsl::robin_set<utils::Entity, utils::Entity::Hasher> targets;
+    };
+
     std::vector<utils::Entity> entities;
     utils::FixedCapacityVector<Variant> variants;
     utils::Entity root;
     Animator* animator;
     FFilamentAsset* owner;
-    SkinVector skins;
+    utils::FixedCapacityVector<Skin> skins;
     NodeMap nodeMap;
     Aabb boundingBox;
     void createAnimator();

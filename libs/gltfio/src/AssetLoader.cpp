@@ -88,47 +88,6 @@ static const char* getNodeName(const cgltf_node* node, const char* defaultNodeNa
     return defaultNodeName;
 }
 
-static void importSkins(const cgltf_data* gltf, const NodeMap& nodeMap, SkinVector& dstSkins) {
-    dstSkins.resize(gltf->skins_count);
-    for (cgltf_size i = 0, len = gltf->nodes_count; i < len; ++i) {
-        const cgltf_node& node = gltf->nodes[i];
-        if (node.skin) {
-            int skinIndex = node.skin - &gltf->skins[0];
-            Entity entity = nodeMap.at(&node);
-            dstSkins[skinIndex].targets.insert(entity);
-        }
-    }
-    for (cgltf_size i = 0, len = gltf->skins_count; i < len; ++i) {
-        Skin& dstSkin = dstSkins[i];
-        const cgltf_skin& srcSkin = gltf->skins[i];
-        if (srcSkin.name) {
-            dstSkin.name = CString(srcSkin.name);
-        }
-
-        // Build a list of transformables for this skin, one for each joint.
-        dstSkin.joints = FixedCapacityVector<Entity>(srcSkin.joints_count);
-        for (cgltf_size i = 0, len = srcSkin.joints_count; i < len; ++i) {
-            auto iter = nodeMap.find(srcSkin.joints[i]);
-            assert_invariant(iter != nodeMap.end());
-            dstSkin.joints[i] = iter->second;
-        }
-
-        // Retain a copy of the inverse bind matrices because the source blob could be evicted later.
-        const cgltf_accessor* srcMatrices = srcSkin.inverse_bind_matrices;
-        dstSkin.inverseBindMatrices = FixedCapacityVector<mat4f>(srcSkin.joints_count);
-        if (srcMatrices) {
-            uint8_t* bytes = (uint8_t*) srcMatrices->buffer_view->buffer->data;
-            if (!bytes) {
-                slog.w << "Empty animation buffer, have resources been loaded yet?" << io::endl;
-                continue;
-            }
-            uint8_t* srcBuffer = bytes + srcMatrices->offset + srcMatrices->buffer_view->offset;
-            memcpy((uint8_t*) dstSkin.inverseBindMatrices.data(),
-                    (const void*) srcBuffer, srcSkin.joints_count * sizeof(mat4f));
-        }
-    }
-}
-
 struct FAssetLoader : public AssetLoader {
     FAssetLoader(const AssetConfiguration& config) :
             mEntityManager(config.entities ? *config.entities : EntityManager::get()),
@@ -141,8 +100,10 @@ struct FAssetLoader : public AssetLoader {
 
     FFilamentAsset* createAsset(const uint8_t* bytes, uint32_t nbytes);
     FFilamentAsset* createInstancedAsset(const uint8_t* bytes, uint32_t numBytes,
-        FilamentInstance** instances, size_t numInstances);
+            FilamentInstance** instances, size_t numInstances);
     FilamentInstance* createInstance(FFilamentAsset* primary);
+    void importSkins(FFilamentAsset* primary, FFilamentInstance* instance,
+            const cgltf_data* srcAsset);
 
     static void destroy(FAssetLoader** loader) noexcept {
         delete *loader;
@@ -408,7 +369,7 @@ FFilamentInstance* FAssetLoader::createInstance(FFilamentAsset* primary,
         createEntity(srcAsset, pair.first, pair.second, instanceRoot, false, instance);
     }
 
-    importSkins(srcAsset, instance->nodeMap, instance->skins);
+    importSkins(primary, instance, srcAsset);
 
     instance->boundingBox = primary->mBoundingBox;
     return instance;
@@ -1401,6 +1362,33 @@ LightManager::Type FAssetLoader::getLightType(const cgltf_light_type light) {
             return LightManager::Type::POINT;
         case cgltf_light_type_spot:
             return LightManager::Type::FOCUSED_SPOT;
+    }
+}
+
+void FAssetLoader::importSkins(FFilamentAsset* primary,
+        FFilamentInstance* instance, const cgltf_data* gltf) {
+    instance->skins.reserve(gltf->skins_count);
+    instance->skins.resize(gltf->skins_count);
+    const auto& nodeMap = instance->nodeMap;
+    for (cgltf_size i = 0, len = gltf->nodes_count; i < len; ++i) {
+        const cgltf_node& node = gltf->nodes[i];
+        if (node.skin) {
+            int skinIndex = node.skin - &gltf->skins[0];
+            Entity entity = nodeMap.at(&node);
+            instance->skins[skinIndex].targets.insert(entity);
+        }
+    }
+    for (cgltf_size i = 0, len = gltf->skins_count; i < len; ++i) {
+        FFilamentInstance::Skin& dstSkin = instance->skins[i];
+        const cgltf_skin& srcSkin = gltf->skins[i];
+
+        // Build a list of transformables for this skin, one for each joint.
+        dstSkin.joints = FixedCapacityVector<Entity>(srcSkin.joints_count);
+        for (cgltf_size i = 0, len = srcSkin.joints_count; i < len; ++i) {
+            auto iter = nodeMap.find(srcSkin.joints[i]);
+            assert_invariant(iter != nodeMap.end());
+            dstSkin.joints[i] = iter->second;
+        }
     }
 }
 

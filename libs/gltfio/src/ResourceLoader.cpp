@@ -388,11 +388,31 @@ bool ResourceLoader::loadResources(FFilamentAsset* asset, bool async) {
     // tangent generation.
     decodeDracoMeshes(asset);
 
-    // Normalize skinning weights, then "import" each skin into the asset by building a mapping of
-    // skins to their affected entities.
+    // For each skin, optionally normalize skinning weights and store a copy of the bind matrices.
     if (gltf->skins_count > 0) {
         if (pImpl->mNormalizeSkinningWeights) {
             normalizeSkinningWeights(asset);
+        }
+        asset->mSkins.reserve(gltf->skins_count);
+        for (cgltf_size i = 0, len = gltf->skins_count; i < len; ++i) {
+            const cgltf_skin& srcSkin = gltf->skins[i];
+            CString name;
+            if (srcSkin.name) {
+                name = CString(srcSkin.name);
+            }
+            const cgltf_accessor* srcMatrices = srcSkin.inverse_bind_matrices;
+            FixedCapacityVector<mat4f> inverseBindMatrices(srcSkin.joints_count);
+            if (srcMatrices) {
+                uint8_t* bytes = (uint8_t*) srcMatrices->buffer_view->buffer->data;
+                assert_invariant(bytes);
+                uint8_t* srcBuffer = bytes + srcMatrices->offset + srcMatrices->buffer_view->offset;
+                memcpy((uint8_t*) inverseBindMatrices.data(),
+                        (const void*) srcBuffer, srcSkin.joints_count * sizeof(mat4f));
+            }
+            asset->mSkins.emplace_back((FFilamentAsset::Skin){
+                .name = std::move(name),
+                .inverseBindMatrices = std::move(inverseBindMatrices),
+            });
         }
     }
 
