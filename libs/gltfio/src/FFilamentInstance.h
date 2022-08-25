@@ -50,7 +50,7 @@ struct Skin {
     // corresponds to a single bone. We considered using the ECS to store these, but this would be
     // complicated because a single node might be used as a bone in more than one skin, and its
     // inverse bind matrix might be unique in each of these skins.
-    utils::FixedCapacityVector<filament::math::mat4f> inverseBindMatrices;
+    utils::FixedCapacityVector<math::mat4f> inverseBindMatrices; ///////////////////////////// TODO: this should be stored in the asset
     utils::FixedCapacityVector<utils::Entity> joints;
 
     // The set of all nodes that are influenced by this skin.
@@ -61,7 +61,7 @@ struct Skin {
 struct VariantMapping {
     utils::Entity renderable;
     size_t primitiveIndex;
-    filament::MaterialInstance* material;
+    MaterialInstance* material;
 };
 
 struct Variant {
@@ -80,7 +80,7 @@ struct FFilamentInstance : public FilamentInstance {
     FFilamentAsset* owner;
     SkinVector skins;
     NodeMap nodeMap;
-    filament::Aabb boundingBox;
+    Aabb boundingBox;
     void createAnimator();
     Animator* getAnimator() const noexcept;
     size_t getSkinCount() const noexcept;

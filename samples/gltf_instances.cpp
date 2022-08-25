@@ -89,8 +89,8 @@ static void printUsage(char* name) {
         "       Specify the backend API: opengl (default), vulkan, or metal\n\n"
         "   --ibl=<path to cmgen IBL>, -i <path>\n"
         "       Override the built-in IBL\n\n"
-        "   --num=<number of instances>, -n <num>\n"
-        "       Number of instances (defaults to 5)\n\n"
+        "   --num=<number of initial instances>, -n <num>\n"
+        "       Number of instances to start with (defaults to 0)\n\n"
         "   --animate=<instance index>, -m <num>\n"
         "       Instance to animate (defaults to all instances)\n\n"
         "   --ubershader, -u\n"
@@ -147,9 +147,6 @@ static int handleCommandLineArguments(int argc, char* argv[], App* app) {
                 app->materialSource = UBERSHADER;
                 break;
         }
-    }
-    if (app->instances.empty()) {
-        app->instances.resize(5);
     }
     return optind;
 }
