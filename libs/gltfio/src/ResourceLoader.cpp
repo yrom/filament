@@ -716,23 +716,21 @@ void ResourceLoader::Impl::computeTangents(FFilamentAsset* asset) {
             continue;
         }
         VertexBuffer* vb = pair.second;
-        auto iter = baseTangents.find(vb);
-        if (iter != baseTangents.end()) {
+        if (auto iter = baseTangents.find(vb); iter != baseTangents.end()) {
             jobParams.emplace_back(Params {{ pair.first }, {vb, nullptr, iter->second }});
         }
     }
     // Create a job description for morph targets.
-    // TODO: do not iterate over the nodemap; iterate over the cgltf hierarchy.
-    const NodeMap& nodeMap = asset->mInstances[0]->nodeMap;
-    for (auto iter : nodeMap) {
-        cgltf_node const* node = iter.first;
-        cgltf_mesh const* mesh = node->mesh;
-        if (UTILS_UNLIKELY(!mesh || !mesh->weights_count)) {
+    cgltf_mesh const* meshes = asset->mSourceAsset->hierarchy->meshes;
+    const size_t meshCount = asset->mSourceAsset->hierarchy->meshes_count;
+    for (size_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
+        const cgltf_mesh& mesh = meshes[meshIndex];
+        if (mesh.weights_count == 0) {
             continue;
         }
-        for (cgltf_size pindex = 0, pcount = mesh->primitives_count; pindex < pcount; ++pindex) {
-            const cgltf_primitive& prim = mesh->primitives[pindex];
-            const auto& gltfioPrim = asset->mMeshCache.at(mesh)[pindex];
+        for (cgltf_size pindex = 0, pcount = mesh.primitives_count; pindex < pcount; ++pindex) {
+            const cgltf_primitive& prim = mesh.primitives[pindex];
+            const auto& gltfioPrim = asset->mMeshCache.at(&mesh)[pindex];
             MorphTargetBuffer* tb = gltfioPrim.targets;
             for (cgltf_size tindex = 0, tcount = prim.targets_count; tindex < tcount; ++ tindex) {
                 const cgltf_morph_target& target = prim.targets[tindex];
@@ -758,13 +756,13 @@ void ResourceLoader::Impl::computeTangents(FFilamentAsset* asset) {
     }
 
     // Kick off jobs for computing tangent frames.
-    JobSystem* js = &mEngine->getJobSystem();
-    JobSystem::Job* parent = js->createJob();
+    JobSystem& js = mEngine->getJobSystem();
+    JobSystem::Job* parent = js.createJob();
     for (Params& params : jobParams) {
         Params* pptr = &params;
-        js->run(jobs::createJob(*js, parent, [pptr] { TangentsJob::run(pptr); }));
+        js.run(jobs::createJob(js, parent, [pptr] { TangentsJob::run(pptr); }));
     }
-    js->runAndWait(parent);
+    js.runAndWait(parent);
 
     // Finally, upload quaternions to the GPU from the main thread.
     for (Params& params : jobParams) {
