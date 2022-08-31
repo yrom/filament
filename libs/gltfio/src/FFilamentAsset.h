@@ -255,9 +255,12 @@ struct FFilamentAsset : public FilamentAsset {
 
     void bindTexture(const TextureSlot& tb, Texture* texture) {
         assert_invariant(texture);
-        tb.materialInstance->setParameter(tb.materialParameter, texture, tb.sampler);
-        mDependencyGraph.addEdge(texture, tb.materialInstance, tb.materialParameter);
+        if (tb.materialInstance) {
+            tb.materialInstance->setParameter(tb.materialParameter, texture, tb.sampler);
+            mDependencyGraph.addEdge(texture, tb.materialInstance, tb.materialParameter);
+        }
         mTextureBindings[tb.sourceTexture] = texture;
+        printf("binding texture=%p at %zu for %s", texture, tb.sourceTexture, tb.materialParameter);
     }
 
     // If a Filament Texture already exists for the given slot, go ahead and bind it to the
@@ -266,6 +269,12 @@ struct FFilamentAsset : public FilamentAsset {
     void addTextureSlot(const TextureSlot& tb) {
         if (mResourcesLoaded) {
             Texture* texture = mTextureBindings[tb.sourceTexture];
+            if (!texture) {
+                // TODO: This doesn't work because ResourceLoader doesn't have any TextureSlots.
+                // We need to gather textures during the createAssetRoot pass, they will have a null materialInstance field but that's ok
+                printf("philip (!!) texture=null at %zu for %s\n", tb.sourceTexture, tb.materialParameter);
+                return;
+            }
             assert_invariant(texture);
             tb.materialInstance->setParameter(tb.materialParameter, texture, tb.sampler);
             // Intentionally omit adding a dependency graph edge here. We do not need progressive
