@@ -319,9 +319,11 @@ public:
     void detachMaterialInstances();
 
     /**
-     * Convenience function to get the first instance (which always exists).
+     * Convenience function to get the first instance, or null if it doesn't exist.
      */
-    FilamentInstance* getInstance() noexcept { return getAssetInstances()[0]; }
+    FilamentInstance* getInstance() noexcept {
+        return getAssetInstanceCount() > 0 ? getAssetInstances()[0] : nullptr;
+    }
 
     /*! \cond PRIVATE */
 

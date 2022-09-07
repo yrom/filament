@@ -716,8 +716,7 @@ void ResourceLoader::Impl::computeTangents(FFilamentAsset* asset) {
         if (UTILS_UNLIKELY(prim->type != cgltf_primitive_type_triangles)) {
             continue;
         }
-        auto iter = baseTangents.find(vb);
-        if (iter != baseTangents.end()) {
+        if (auto iter = baseTangents.find(vb); iter != baseTangents.end()) {
             jobParams.emplace_back(Params {{ prim }, {vb, nullptr, iter->second }});
         }
     }
