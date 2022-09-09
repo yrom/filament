@@ -249,10 +249,10 @@ private:
             bool vertexColor);
     MaterialInstance* createMaterialInstance(const cgltf_data* srcAsset,
             const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor);
-    MaterialInfo getMaterialInfo(const cgltf_data* srcAsset,
-            const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor) const;
+    MaterialInfo getMaterialInfo(const cgltf_data* srcAsset, const cgltf_material* inputMat,
+            bool vertexColor) const;
     void configureMaterial(const MaterialInfo& info, const cgltf_material* inputMat,
-        MaterialInstance* mi);
+            MaterialInstance* mi);
 
 public:
     EntityManager& mEntityManager;
@@ -766,9 +766,17 @@ void FAssetLoader::createMaterialVariants(const cgltf_data* srcAsset, const cglt
 
 bool FAssetLoader::createPrimitive(const cgltf_primitive* inPrim, Primitive* outPrim,
         const char* name) {
-    Material* material = getMaterial(mAsset->mSourceAsset->hierarchy,
-                inPrim->material, &outPrim->uvmap, primitiveHasVertexColor(inPrim));
+    const cgltf_data* srcAsset = mAsset->mSourceAsset->hierarchy;
+    const bool vertexColor = primitiveHasVertexColor(inPrim);
+    Material* material = getMaterial(srcAsset, inPrim->material, &outPrim->uvmap, vertexColor);
     AttributeBitset requiredAttributes = material->getRequiredAttributes();
+    MaterialInfo info = getMaterialInfo(srcAsset, inPrim->material, vertexColor);
+
+    // MaterialInstance objects are not created in this load phase (they are not created until
+    // the asset instances are created) however we need to inform the ResourceLoader about
+    // all active textures.
+    #warning Implement this
+    // configureMaterial(info, inPrim->material, nullptr);
 
     // Create a little lambda that appends to the asset's vertex buffer slots.
     auto slots = &mAsset->mBufferSlots;
@@ -1147,7 +1155,7 @@ void FAssetLoader::createCamera(const cgltf_camera* camera, Entity entity) {
 }
 
 FAssetLoader::MaterialInfo FAssetLoader::getMaterialInfo(const cgltf_data* srcAsset,
-        const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor) const {
+        const cgltf_material* inputMat, bool vertexColor) const {
     const auto& mrConfig = inputMat->pbr_metallic_roughness;
     const auto& sgConfig = inputMat->pbr_specular_glossiness;
     const auto& ccConfig = inputMat->clearcoat;
@@ -1246,7 +1254,7 @@ FAssetLoader::MaterialInfo FAssetLoader::getMaterialInfo(const cgltf_data* srcAs
 
 Material* FAssetLoader::getMaterial(const cgltf_data* srcAsset,
         const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor) {
-    MaterialInfo info = getMaterialInfo(srcAsset, inputMat, uvmap, vertexColor);
+    MaterialInfo info = getMaterialInfo(srcAsset, inputMat, vertexColor);
     Material* material = mMaterials.getMaterial(&info.key, uvmap, inputMat->name);
     assert_invariant(material);
     return material;
@@ -1261,7 +1269,7 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
         return cacheEntry->instance;
     }
 
-    MaterialInfo info = getMaterialInfo(srcAsset, inputMat, uvmap, vertexColor);
+    MaterialInfo info = getMaterialInfo(srcAsset, inputMat, vertexColor);
 
     // Check if this material has an extras string.
     CString extras;
