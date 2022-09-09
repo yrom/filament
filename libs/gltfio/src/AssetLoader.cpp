@@ -239,14 +239,18 @@ private:
             FFilamentInstance* instance);
 
     // Utility methods that work with MaterialProvider.
+    struct MaterialInfo {
+        MaterialKey key;
+        cgltf_texture_view baseColor;
+        cgltf_texture_view metallicRoughness;
+    };
+
     Material* getMaterial(const cgltf_data* srcAsset, const cgltf_material* inputMat, UvMap* uvmap,
             bool vertexColor);
     MaterialInstance* createMaterialInstance(const cgltf_data* srcAsset,
             const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor);
-    MaterialKey getMaterialKey(const cgltf_data* srcAsset,
-            const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor,
-            cgltf_texture_view* baseColorTexture,
-            cgltf_texture_view* metallicRoughnessTexture) const;
+    MaterialInfo getMaterialInfo(const cgltf_data* srcAsset,
+            const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor) const;
 
 public:
     EntityManager& mEntityManager;
@@ -1145,17 +1149,19 @@ void FAssetLoader::createCamera(const cgltf_camera* camera, Entity entity) {
     mAsset->mCameraEntities.push_back(entity);
 }
 
-MaterialKey FAssetLoader::getMaterialKey(const cgltf_data* srcAsset,
-        const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor,
-        cgltf_texture_view* baseColorTexture, cgltf_texture_view* metallicRoughnessTexture) const {
+FAssetLoader::MaterialInfo FAssetLoader::getMaterialInfo(const cgltf_data* srcAsset,
+        const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor) const {
     auto mrConfig = inputMat->pbr_metallic_roughness;
     auto sgConfig = inputMat->pbr_specular_glossiness;
     auto ccConfig = inputMat->clearcoat;
     auto trConfig = inputMat->transmission;
     auto shConfig = inputMat->sheen;
     auto vlConfig = inputMat->volume;
-    *baseColorTexture = mrConfig.base_color_texture;
-    *metallicRoughnessTexture = mrConfig.metallic_roughness_texture;
+
+    MaterialInfo info = {
+        .baseColor = mrConfig.base_color_texture,
+        .metallicRoughness = mrConfig.metallic_roughness_texture
+    };
 
     bool hasTextureTransforms =
         sgConfig.diffuse_texture.has_transform ||
@@ -1172,16 +1178,16 @@ MaterialKey FAssetLoader::getMaterialKey(const cgltf_data* srcAsset,
         shConfig.sheen_roughness_texture.has_transform ||
         trConfig.transmission_texture.has_transform;
 
-    MaterialKey matkey {
+    info.key = {
         .doubleSided = !!inputMat->double_sided,
         .unlit = !!inputMat->unlit,
         .hasVertexColors = vertexColor,
-        .hasBaseColorTexture = baseColorTexture->texture != nullptr,
+        .hasBaseColorTexture = info.baseColor.texture != nullptr,
         .hasNormalTexture = inputMat->normal_texture.texture != nullptr,
         .hasOcclusionTexture = inputMat->occlusion_texture.texture != nullptr,
         .hasEmissiveTexture = inputMat->emissive_texture.texture != nullptr,
         .enableDiagnostics = mDiagnosticsEnabled,
-        .baseColorUV = (uint8_t) baseColorTexture->texcoord,
+        .baseColorUV = (uint8_t) info.baseColor.texcoord,
         .hasClearCoatTexture = ccConfig.clearcoat_texture.texture != nullptr,
         .clearCoatUV = (uint8_t) ccConfig.clearcoat_texture.texcoord,
         .hasClearCoatRoughnessTexture = ccConfig.clearcoat_roughness_texture.texture != nullptr,
@@ -1208,46 +1214,43 @@ MaterialKey FAssetLoader::getMaterialKey(const cgltf_data* srcAsset,
     };
 
     if (inputMat->has_pbr_specular_glossiness) {
-        matkey.useSpecularGlossiness = true;
+        info.key.useSpecularGlossiness = true;
         if (sgConfig.diffuse_texture.texture) {
-            *baseColorTexture = sgConfig.diffuse_texture;
-            matkey.hasBaseColorTexture = true;
-            matkey.baseColorUV = (uint8_t) baseColorTexture->texcoord;
+            info.baseColor = sgConfig.diffuse_texture;
+            info.key.hasBaseColorTexture = true;
+            info.key.baseColorUV = (uint8_t) info.baseColor.texcoord;
         }
         if (sgConfig.specular_glossiness_texture.texture) {
-            *metallicRoughnessTexture = sgConfig.specular_glossiness_texture;
-            matkey.hasSpecularGlossinessTexture = true;
-            matkey.specularGlossinessUV = (uint8_t) metallicRoughnessTexture->texcoord;
+            info.metallicRoughness = sgConfig.specular_glossiness_texture;
+            info.key.hasSpecularGlossinessTexture = true;
+            info.key.specularGlossinessUV = (uint8_t) info.metallicRoughness.texcoord;
         }
     } else {
-        matkey.hasMetallicRoughnessTexture = metallicRoughnessTexture->texture != nullptr;
-        matkey.metallicRoughnessUV = (uint8_t) metallicRoughnessTexture->texcoord;
+        info.key.hasMetallicRoughnessTexture = info.metallicRoughness.texture != nullptr;
+        info.key.metallicRoughnessUV = (uint8_t) info.metallicRoughness.texcoord;
     }
 
     switch (inputMat->alpha_mode) {
         case cgltf_alpha_mode_opaque:
-            matkey.alphaMode = AlphaMode::OPAQUE;
+            info.key.alphaMode = AlphaMode::OPAQUE;
             break;
         case cgltf_alpha_mode_mask:
-            matkey.alphaMode = AlphaMode::MASK;
+            info.key.alphaMode = AlphaMode::MASK;
             break;
         case cgltf_alpha_mode_blend:
-            matkey.alphaMode = AlphaMode::BLEND;
+            info.key.alphaMode = AlphaMode::BLEND;
             break;
         case cgltf_alpha_mode_max_enum:
             break;
     }
 
-    return matkey;
+    return info;
 }
 
 Material* FAssetLoader::getMaterial(const cgltf_data* srcAsset,
         const cgltf_material* inputMat, UvMap* uvmap, bool vertexColor) {
-    cgltf_texture_view baseColorTexture;
-    cgltf_texture_view metallicRoughnessTexture;
-    MaterialKey matkey = getMaterialKey(srcAsset, inputMat, uvmap, vertexColor,
-            &baseColorTexture, &metallicRoughnessTexture);
-    Material* material = mMaterials.getMaterial(&matkey, uvmap, inputMat->name);
+    MaterialInfo info = getMaterialInfo(srcAsset, inputMat, uvmap, vertexColor);
+    Material* material = mMaterials.getMaterial(&info.key, uvmap, inputMat->name);
     assert_invariant(material);
     return material;
 }
@@ -1261,10 +1264,8 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
         return cacheEntry->instance;
     }
 
-    cgltf_texture_view baseColorTexture;
-    cgltf_texture_view metallicRoughnessTexture;
-    MaterialKey matkey = getMaterialKey(srcAsset, inputMat, uvmap, vertexColor, &baseColorTexture,
-            &metallicRoughnessTexture);
+    MaterialInfo info = getMaterialInfo(srcAsset, inputMat, uvmap, vertexColor);
+    const MaterialKey matkey = info.key;
 
     // Check if this material has an extras string.
     CString extras;
@@ -1275,7 +1276,7 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
 
     // This not only creates a material instance, it modifies the material key according to our
     // rendering constraints. For example, Filament only supports 2 sets of texture coordinates.
-    MaterialInstance* mi = mMaterials.createMaterialInstance(&matkey, uvmap, inputMat->name,
+    MaterialInstance* mi = mMaterials.createMaterialInstance(&info.key, uvmap, inputMat->name,
             extras.c_str());
     if (!mi) {
         slog.e << "No material with the specified requirements exists." << io::endl;
@@ -1283,6 +1284,9 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
     }
 
     mAsset->mMaterialInstances.push_back(mi);
+    *cacheEntry = { mi, *uvmap };
+
+    // EYEBALL: configureMaterial(info, inputMat, mi);
 
     auto mrConfig = inputMat->pbr_metallic_roughness;
     auto sgConfig = inputMat->pbr_specular_glossiness;
@@ -1318,9 +1322,9 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
     }
 
     if (matkey.hasBaseColorTexture) {
-        mAsset->addTextureBinding(mi, "baseColorMap", baseColorTexture.texture, true);
+        mAsset->addTextureBinding(mi, "baseColorMap", info.baseColor.texture, true);
         if (matkey.hasTextureTransforms) {
-            const cgltf_texture_transform& uvt = baseColorTexture.transform;
+            const cgltf_texture_transform& uvt = info.baseColor.transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
             mi->setParameter("baseColorUvMatrix", uvmat);
         }
@@ -1332,9 +1336,9 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
         // specularGlossinessTexture are both sRGB, whereas the core glTF spec stipulates that
         // metallicRoughness is not sRGB.
         bool srgb = inputMat->has_pbr_specular_glossiness;
-        mAsset->addTextureBinding(mi, "metallicRoughnessMap", metallicRoughnessTexture.texture, srgb);
+        mAsset->addTextureBinding(mi, "metallicRoughnessMap", info.metallicRoughness.texture, srgb);
         if (matkey.hasTextureTransforms) {
-            const cgltf_texture_transform& uvt = metallicRoughnessTexture.transform;
+            const cgltf_texture_transform& uvt = info.metallicRoughness.transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
             mi->setParameter("metallicRoughnessUvMatrix", uvmat);
         }
@@ -1485,7 +1489,6 @@ MaterialInstance* FAssetLoader::createMaterialInstance(const cgltf_data* srcAsse
                 inputMat->emissive_strength.emissive_strength : 1.0f);
     }
 
-    *cacheEntry = { mi, *uvmap };
     return mi;
 }
 
