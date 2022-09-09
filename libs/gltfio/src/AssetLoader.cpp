@@ -1295,6 +1295,10 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
     auto shConfig = inputMat->sheen;
     auto vlConfig = inputMat->volume;
 
+    auto addTextureBinding = [mi, this](const char* param, const cgltf_texture* tex, bool srgb) {
+        mAsset->addTextureBinding(mi, param, tex, srgb);
+    };
+
     // Check the material blending mode, not the cgltf blending mode, because the provider
     // might have selected an alternative blend mode (e.g. to support transmission).
     if (mi->getMaterial()->getBlendingMode() == filament::BlendingMode::MASKED) {
@@ -1324,7 +1328,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
     }
 
     if (matkey.hasBaseColorTexture) {
-        mAsset->addTextureBinding(mi, "baseColorMap", info.baseColor->texture, true);
+        addTextureBinding("baseColorMap", info.baseColor->texture, true);
         if (matkey.hasTextureTransforms) {
             const cgltf_texture_transform& uvt = info.baseColor->transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
@@ -1338,7 +1342,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
         // specularGlossinessTexture are both sRGB, whereas the core glTF spec stipulates that
         // metallicRoughness is not sRGB.
         bool srgb = inputMat->has_pbr_specular_glossiness;
-        mAsset->addTextureBinding(mi, "metallicRoughnessMap", info.metallicRoughness->texture, srgb);
+        addTextureBinding("metallicRoughnessMap", info.metallicRoughness->texture, srgb);
         if (matkey.hasTextureTransforms) {
             const cgltf_texture_transform& uvt = info.metallicRoughness->transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
@@ -1347,7 +1351,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
     }
 
     if (matkey.hasNormalTexture) {
-        mAsset->addTextureBinding(mi, "normalMap", inputMat->normal_texture.texture, false);
+        addTextureBinding("normalMap", inputMat->normal_texture.texture, false);
         if (matkey.hasTextureTransforms) {
             const cgltf_texture_transform& uvt = inputMat->normal_texture.transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
@@ -1359,7 +1363,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
     }
 
     if (matkey.hasOcclusionTexture) {
-        mAsset->addTextureBinding(mi, "occlusionMap", inputMat->occlusion_texture.texture, false);
+        addTextureBinding("occlusionMap", inputMat->occlusion_texture.texture, false);
         if (matkey.hasTextureTransforms) {
             const cgltf_texture_transform& uvt = inputMat->occlusion_texture.transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
@@ -1371,7 +1375,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
     }
 
     if (matkey.hasEmissiveTexture) {
-        mAsset->addTextureBinding(mi, "emissiveMap", inputMat->emissive_texture.texture, true);
+        addTextureBinding("emissiveMap", inputMat->emissive_texture.texture, true);
         if (matkey.hasTextureTransforms) {
             const cgltf_texture_transform& uvt = inputMat->emissive_texture.transform;
             auto uvmat = matrixFromUvTransform(uvt.offset, uvt.rotation, uvt.scale);
@@ -1384,7 +1388,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
         mi->setParameter("clearCoatRoughnessFactor", ccConfig.clearcoat_roughness_factor);
 
         if (matkey.hasClearCoatTexture) {
-            mAsset->addTextureBinding(mi, "clearCoatMap", ccConfig.clearcoat_texture.texture,
+            addTextureBinding("clearCoatMap", ccConfig.clearcoat_texture.texture,
                     false);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = ccConfig.clearcoat_texture.transform;
@@ -1393,7 +1397,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
             }
         }
         if (matkey.hasClearCoatRoughnessTexture) {
-            mAsset->addTextureBinding(mi, "clearCoatRoughnessMap",
+            addTextureBinding("clearCoatRoughnessMap",
                     ccConfig.clearcoat_roughness_texture.texture, false);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = ccConfig.clearcoat_roughness_texture.transform;
@@ -1402,7 +1406,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
             }
         }
         if (matkey.hasClearCoatNormalTexture) {
-            mAsset->addTextureBinding(mi, "clearCoatNormalMap",
+            addTextureBinding("clearCoatNormalMap",
                     ccConfig.clearcoat_normal_texture.texture, false);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = ccConfig.clearcoat_normal_texture.transform;
@@ -1419,7 +1423,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
         mi->setParameter("sheenRoughnessFactor", shConfig.sheen_roughness_factor);
 
         if (matkey.hasSheenColorTexture) {
-            mAsset->addTextureBinding(mi, "sheenColorMap", shConfig.sheen_color_texture.texture,
+            addTextureBinding("sheenColorMap", shConfig.sheen_color_texture.texture,
                     true);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = shConfig.sheen_color_texture.transform;
@@ -1428,7 +1432,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
             }
         }
         if (matkey.hasSheenRoughnessTexture) {
-            mAsset->addTextureBinding(mi, "sheenRoughnessMap",
+            addTextureBinding("sheenRoughnessMap",
                     shConfig.sheen_roughness_texture.texture, false);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = shConfig.sheen_roughness_texture.transform;
@@ -1449,7 +1453,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
         mi->setParameter("volumeAbsorption", RgbType::LINEAR, absorption);
 
         if (matkey.hasVolumeThicknessTexture) {
-            mAsset->addTextureBinding(mi, "volumeThicknessMap", vlConfig.thickness_texture.texture,
+            addTextureBinding("volumeThicknessMap", vlConfig.thickness_texture.texture,
                     false);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = vlConfig.thickness_texture.transform;
@@ -1462,7 +1466,7 @@ void FAssetLoader::configureMaterial(const MaterialInfo& info, const cgltf_mater
     if (matkey.hasTransmission) {
         mi->setParameter("transmissionFactor", trConfig.transmission_factor);
         if (matkey.hasTransmissionTexture) {
-            mAsset->addTextureBinding(mi, "transmissionMap", trConfig.transmission_texture.texture,
+            addTextureBinding("transmissionMap", trConfig.transmission_texture.texture,
                     false);
             if (matkey.hasTextureTransforms) {
                 const cgltf_texture_transform& uvt = trConfig.transmission_texture.transform;
