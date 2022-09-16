@@ -197,6 +197,34 @@ public:
     FilamentInstance* createInstance(FilamentAsset* primary);
 
     /**
+     * Creates a destroyable instance from an immutable asset, optionally detaching its material
+     * instances.
+     *
+     * @param primary TODO(prideout)
+     * @param materials TODO(prideout)
+     * @return TODO(prideout)
+     */
+    FilamentInstance* createDetachedInstance(FilamentAsset const* primary,
+            MaterialInstance* materials = nullptr);
+
+    /**
+     * Determines the number of material instances that will be created for each FilamentInstance.
+     *
+     * @param primary TODO(prideout)
+     * @return TODO(prideout)
+     */
+    size_t getMaterialInstanceCount(FilamentAsset const* primary);
+
+    /**
+     * Creates a destroyable instance from an immutable asset, optionally detaching its material
+     * instances.
+     *
+     * @param primary TODO(prideout)
+     * @param instance TODO(prideout)
+     */
+    void destroyDetachedInstance(FilamentAsset const* primary, FilamentInstance* instance);
+
+    /**
      * Allows clients to enable diagnostic shading on newly-loaded assets.
      */
     void enableDiagnostics(bool enable = true);

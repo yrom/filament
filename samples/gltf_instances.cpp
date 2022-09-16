@@ -63,7 +63,7 @@ struct App {
     ViewerGui* viewer;
     Config config;
     AssetLoader* loader;
-    FilamentAsset* asset = nullptr;
+    FilamentAsset const* asset = nullptr;
     NameComponentManager* names;
     MaterialProvider* materials;
     MaterialSource materialSource = JITSHADER;
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto loadAsset = [&app](utils::Path filename) {
+    auto loadAsset = [&app](utils::Path filename) -> FilamentAsset* {
         // Peek at the file size to allow pre-allocation.
         long contentSize = static_cast<long>(getFileSize(filename.c_str()));
         if (contentSize <= 0) {
@@ -190,18 +190,19 @@ int main(int argc, char** argv) {
         }
 
         // Parse the glTF file and create Filament entities.
-        app.asset = app.loader->createInstancedAsset(buffer.data(), buffer.size(),
+        FilamentAsset* asset = app.loader->createInstancedAsset(buffer.data(), buffer.size(),
                 app.instances.data(), app.instances.size());
         buffer.clear();
         buffer.shrink_to_fit();
 
-        if (!app.asset) {
+        if (!asset) {
             std::cerr << "Unable to parse " << filename << std::endl;
             exit(1);
         }
+        return asset;
     };
 
-    auto loadResources = [&app] (utils::Path filename) {
+    auto loadResources = [&app] (utils::Path filename, FilamentAsset* asset) {
         // Load external textures and buffers.
         std::string gltfPath = filename.getAbsolutePath();
         ResourceConfiguration configuration;
@@ -217,7 +218,7 @@ int main(int argc, char** argv) {
             app.resourceLoader->addTextureProvider("image/ktx2", app.ktxDecoder);
         }
 
-        if (!app.resourceLoader->asyncBeginLoad(app.asset)) {
+        if (!app.resourceLoader->asyncBeginLoad(asset)) {
             std::cerr << "Unable to start loading resources for " << filename << std::endl;
             exit(1);
         }
@@ -251,12 +252,15 @@ int main(int argc, char** argv) {
                 createUbershaderProvider(engine, UBERARCHIVE_DEFAULT_DATA, UBERARCHIVE_DEFAULT_SIZE);
 
         app.loader = AssetLoader::create({engine, app.materials, app.names });
+
+        FilamentAsset* asset = nullptr;
+
         if (filename.isEmpty()) {
-            app.asset = app.loader->createInstancedAsset(
+            asset = app.loader->createInstancedAsset(
                     GLTF_DEMO_DAMAGEDHELMET_DATA, GLTF_DEMO_DAMAGEDHELMET_SIZE,
                     app.instances.data(), app.instances.size());
         } else {
-            loadAsset(filename);
+            asset = loadAsset(filename);
         }
 
         FilamentInstance* instance = nullptr;
@@ -265,8 +269,9 @@ int main(int argc, char** argv) {
         }
 
         arrangeIntoCircle();
-        loadResources(filename);
-        app.viewer->setAsset(app.asset, instance);
+        loadResources(filename, asset);
+        app.viewer->setAsset(asset, instance);
+        app.asset = asset;
     };
 
     auto cleanup = [&app](Engine* engine, View*, Scene*) {
@@ -292,7 +297,7 @@ int main(int argc, char** argv) {
         // Add a new instance every second until reaching 100 instances.
         static double previous = 0.0;
         if (now - previous > 1.0 && app.asset->getAssetInstanceCount() < 100) {
-            FilamentInstance* instance = app.loader->createInstance(app.asset);
+            FilamentInstance* instance = app.loader->createDetachedInstance(app.asset);
 
             // If the asset has variants, rotate through each variant.
             const size_t variantCount = app.asset->getMaterialVariantCount();
