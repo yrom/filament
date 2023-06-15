@@ -614,7 +614,7 @@ void postProcess(inout PostProcessInputs postProcess) {
         // kill the work performed above
         color.a = 1.0;
 #endif
-        postProcess.color = color * alpha;
+        postProcess.color = clamp(color * alpha, vec4(0.0), vec4(1.0));
         postProcess.alpha = alpha;
         return;
     }
@@ -657,7 +657,7 @@ void postProcess(inout PostProcessInputs postProcess) {
     // composite the foreground and background layers together.
     // the downside of doing this is that we couldn't use a different upscaler for each
     // layer, but this is a lot less costly
-    postProcess.color = foreground + (1.0 - fgOpacity) * background;
+    postProcess.color = clamp(foreground + (1.0 - fgOpacity) * background, vec4(0.0), vec4(1.0));
     postProcess.alpha = fgOpacity  + (1.0 - fgOpacity) * bgOpacity;
 }
 
