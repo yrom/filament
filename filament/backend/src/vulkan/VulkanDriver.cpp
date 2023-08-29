@@ -259,6 +259,7 @@ void VulkanDriver::terminate() {
 
 void VulkanDriver::tick(int) {
     mCommands->updateFences();
+    mResourceAllocator.print();
 }
 
 // Garbage collection should not occur too frequently, only about once per frame. Internally, the

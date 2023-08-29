@@ -28,6 +28,8 @@ using namespace bluevk;
 
 namespace filament::backend {
 
+static size_t  gallocated = 0;
+    
 using ImgUtil = VulkanImageUtility;
 VulkanTexture::VulkanTexture(VkDevice device, VmaAllocator allocator, VulkanCommands* commands,
         VkImage image, VkFormat format, uint8_t samples, uint32_t width, uint32_t height,
@@ -187,13 +189,21 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physicalDevice,
     ASSERT_POSTCONDITION(memoryTypeIndex < VK_MAX_MEMORY_TYPES,
             "VulkanTexture: unable to find a memory type that meets requirements.");
 
+    
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memReqs.size,
         .memoryTypeIndex = memoryTypeIndex,
     };
+    
     error = vkAllocateMemory(mDevice, &allocInfo, nullptr, &mTextureImageMemory);
-    ASSERT_POSTCONDITION(!error, "Unable to allocate image memory.");
+
+    mSize = memReqs.size;
+    gallocated += mSize;
+    utils::slog.d <<"allocating=" << memReqs.size <<" sum=" <<gallocated << utils::io::endl;
+
+
+    ASSERT_POSTCONDITION(!error, "Unable to allocate image memory. Error=%d", error);
     error = vkBindImageMemory(mDevice, mTextureImage, mTextureImageMemory, 0);
     ASSERT_POSTCONDITION(!error, "Unable to bind image.");
 
@@ -238,6 +248,8 @@ VulkanTexture::~VulkanTexture() {
     if (mTextureImageMemory != VK_NULL_HANDLE) {
         vkDestroyImage(mDevice, mTextureImage, VKALLOC);
         vkFreeMemory(mDevice, mTextureImageMemory, VKALLOC);
+        gallocated -= mSize;        
+        utils::slog.d <<"freeing=" << mSize <<" sum=" <<gallocated << utils::io::endl;
     }
     for (auto entry : mCachedImageViews) {
         vkDestroyImageView(mDevice, entry.second, VKALLOC);

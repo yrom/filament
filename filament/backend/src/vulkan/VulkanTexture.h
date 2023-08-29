@@ -117,6 +117,8 @@ private:
     VkDevice mDevice;
     VmaAllocator mAllocator;
     VulkanCommands* mCommands;
+
+    size_t mSize = 0;
 };
 
 } // namespace filament::backend

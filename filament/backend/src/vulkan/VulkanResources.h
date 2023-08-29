@@ -236,8 +236,9 @@ void deallocateResource(VulkanResourceAllocator* allocator, VulkanResourceType t
 template<typename ResourceType, typename SetType>
 class VulkanResourceManagerImpl {
 public:
-    explicit VulkanResourceManagerImpl(VulkanResourceAllocator* allocator)
-        : mAllocator(allocator) {
+    explicit VulkanResourceManagerImpl(VulkanResourceAllocator* allocator, bool debug=false)
+        : mAllocator(allocator),
+          mDebug(debug) {
         if constexpr (std::is_base_of_v<VulkanThreadSafeResource, ResourceType>) {
             mMutex = std::make_unique<utils::Mutex>();
         }
@@ -262,6 +263,12 @@ public:
             UNLOCK_IF_NEEDED();
             return;
         }
+
+        if (mDebug) {
+            utils::slog.d <<"acquire this=" << this << " resource=" << resource
+                          << " type=" << static_cast<uint32_t>(resource->getType())
+                          << " count=" << resource->refcount() << utils::io::endl;
+        }
         mResources.insert(resource);
         UNLOCK_IF_NEEDED();
         resource->ref();
@@ -269,6 +276,10 @@ public:
 
     // Transfers ownership from one resource set to another
     inline void acquire(VulkanResourceManagerImpl<ResourceType, SetType>* srcResources) {
+        if (mDebug) {
+            utils::slog.d <<"transfering src=" << srcResources << " to " << this << utils::io::endl;
+        }
+
         LOCK_IF_NEEDED();
         for (auto iter = srcResources->mResources.begin(); iter != srcResources->mResources.end();
                 iter++) {
@@ -276,6 +287,10 @@ public:
         }
         UNLOCK_IF_NEEDED();
         srcResources->clear();
+
+        if (mDebug) {
+            utils::slog.d <<"end transfering src=" << srcResources << " to " << this << utils::io::endl;
+        }
     }
 
     inline void release(ResourceType* resource) {
@@ -295,12 +310,20 @@ public:
     }
 
     inline void clear() {
+        if (mDebug) {
+            utils::slog.d <<"clearing: " << this << utils::io::endl;
+        }
+             
         LOCK_IF_NEEDED();
         for (auto iter = mResources.begin(); iter != mResources.end(); iter++) {
             derefImpl(*iter);
         }
         mResources.clear();
         UNLOCK_IF_NEEDED();
+
+        if (mDebug) {
+            utils::slog.d <<"end clearing: " << this << utils::io::endl;
+        }
     }
 
     inline size_t size() {
@@ -309,9 +332,24 @@ public:
 
 private:
     inline void derefImpl(ResourceType* resource) {
+            if (mDebug) {
+                utils::slog.d <<"before derefimpl this=" << this <<" resource: " << resource 
+                              << " type=" << static_cast<uint32_t>(resource->getType())
+                              << " count=" << resource->refcount() << utils::io::endl;
+            }
         resource->deref();
         if (resource->refcount() != 0) {
+            if (mDebug) {
+                utils::slog.d <<"derefimpl this=" << this <<" resource: " << resource 
+                              << " type=" << static_cast<uint32_t>(resource->getType())
+                              << " count=" << resource->refcount() << utils::io::endl;
+            }
             return;
+        }
+        if (mDebug) {
+            utils::slog.d <<"derefimpl this=" << this <<" resource: " << resource
+                          << " type=" << static_cast<uint32_t>(resource->getType())
+                          << " release" << utils::io::endl;
         }
         deallocateResource(mAllocator, resource->getType(), resource->getId());
     }
@@ -319,6 +357,7 @@ private:
     VulkanResourceAllocator* mAllocator;
     SetType mResources;
     std::unique_ptr<utils::Mutex> mMutex;
+    bool mDebug;
 };
 
 using VulkanAcquireOnlyResourceManager

@@ -31,16 +31,16 @@ namespace filament::backend {
 
 // RESOURCE_TYPE_COUNT matches the count of enum VulkanResourceType.
 #define RESOURCE_TYPE_COUNT 12
-#define DEBUG_RESOURCE_LEAKS 0
+#define DEBUG_RESOURCE_LEAKS 1
 
 #if DEBUG_RESOURCE_LEAKS
     #define TRACK_INCREMENT()                                       \
-    if (!IS_MANAGED_TYPE(obj->mType)) {                             \
-        mDebugOnlyResourceCount[static_cast<size_t>(obj->mType)]++; \
+    if (!IS_HEAP_ALLOC_TYPE(obj->getType())) {                      \
+    mDebugOnlyResourceCount[static_cast<size_t>(obj->getType())]++; \
     }
     #define TRACK_DECREMENT()                                       \
-    if (!IS_MANAGED_TYPE(obj->mType)) {                             \
-        mDebugOnlyResourceCount[static_cast<size_t>(obj->mType)]--; \
+    if (!IS_HEAP_ALLOC_TYPE(obj->getType())) {                      \
+    mDebugOnlyResourceCount[static_cast<size_t>(obj->getType())]--; \
     }
 #else
     // No-op

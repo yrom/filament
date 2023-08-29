@@ -68,7 +68,7 @@ VulkanPipelineCache::getUsageFlags(uint16_t binding, ShaderStageFlags flags, Usa
 VulkanPipelineCache::VulkanPipelineCache(VulkanResourceAllocator* allocator)
     : mCurrentRasterState(createDefaultRasterState()),
       mResourceAllocator(allocator),
-      mPipelineBoundResources(allocator) {
+      mPipelineBoundResources(allocator, true) {
     mDummyBufferWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     mDummyBufferWriteInfo.pNext = nullptr;
     mDummyBufferWriteInfo.dstArrayElement = 0;
@@ -153,10 +153,11 @@ bool VulkanPipelineCache::bindDescriptors(VkCommandBuffer cmdbuffer) noexcept {
     auto resourceEntry = mDescriptorResources.find(cacheEntry->id);
     if (resourceEntry == mDescriptorResources.end()) {
         mDescriptorResources[cacheEntry->id]
-                = std::make_unique<VulkanAcquireOnlyResourceManager>(mResourceAllocator);
+            = std::make_unique<VulkanAcquireOnlyResourceManager>(mResourceAllocator, true);
         resourceEntry = mDescriptorResources.find(cacheEntry->id);
     }
     resourceEntry->second->acquire(&mPipelineBoundResources);
+    //    utils::slog.d <<"descriptor set resource size: " << mDescriptorResources.size() << utils::io::endl;
 
     vkCmdBindDescriptorSets(cmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
             getOrCreatePipelineLayout()->handle, 0, VulkanPipelineCache::DESCRIPTOR_TYPE_COUNT,
@@ -587,12 +588,13 @@ void VulkanPipelineCache::bindVertexArray(const VertexArray& varray) noexcept {
     }
 }
 
-VulkanPipelineCache::UniformBufferBinding VulkanPipelineCache::getUniformBufferBinding(uint32_t bindingIndex) const noexcept {
+VulkanPipelineCache::UniformBufferBinding VulkanPipelineCache::getUniformBufferBinding(
+        uint32_t bindingIndex) const noexcept {
     auto& key = mDescriptorRequirements;
     return {
-        key.uniformBuffers[bindingIndex],
-        key.uniformBufferOffsets[bindingIndex],
-        key.uniformBufferSizes[bindingIndex],
+            key.uniformBuffers[bindingIndex],
+            key.uniformBufferOffsets[bindingIndex],
+            key.uniformBufferSizes[bindingIndex],
     };
 }
 
@@ -710,6 +712,7 @@ void VulkanPipelineCache::onCommandBuffer(const VulkanCommandBuffer& cmdbuffer) 
             ++iter;
         }
     }
+    utils::slog.d <<"command buffer -> descriptor set resource size: " << mDescriptorResources.size() << utils::io::endl;
 
     // Evict any pipelines that have not been used in a while.
     // Any pipeline older than VK_MAX_COMMAND_BUFFERS can be safely destroyed.
