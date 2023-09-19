@@ -99,7 +99,7 @@ struct VulkanVertexBuffer : public HwVertexBuffer, VulkanResource {
     utils::FixedCapacityVector<VulkanBuffer const*> buffers;
 
 private:
-    FixedSizeVulkanResourceManager mResources;
+    FixedSizeVulkanResourceManager<MAX_VERTEX_BUFFER_COUNT> mResources;
 };
 
 struct VulkanIndexBuffer : public HwIndexBuffer, VulkanResource {
@@ -146,7 +146,8 @@ struct VulkanRenderPrimitive : public HwRenderPrimitive, VulkanResource {
     VkPrimitiveTopology primitiveTopology;
 
 private:
-    FixedSizeVulkanResourceManager mResources;
+    // Used to track the vertex and index buffers only.
+    FixedSizeVulkanResourceManager<2> mResources;
 };
 
 struct VulkanFence : public HwFence, VulkanResource {

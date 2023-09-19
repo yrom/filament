@@ -17,7 +17,6 @@
 #ifndef TNT_FILAMENT_BACKEND_VULKANRESOURCES_H
 #define TNT_FILAMENT_BACKEND_VULKANRESOURCES_H
 
-#include <backend/DriverEnums.h>// For MAX_VERTEX_BUFFER_COUNT
 #include <backend/Handle.h>
 
 #include <tsl/robin_set.h>
@@ -156,13 +155,13 @@ namespace {
 
 // When the size of the resource set is known to be small, (for example for VulkanRenderPrimitive),
 // we just use a std::array to back the set.
+template<std::size_t SIZE>
 class FixedCapacityResourceSet {
 private:
-    constexpr static size_t const SIZE = MAX_VERTEX_BUFFER_COUNT;
     using FixedSizeArray = std::array<VulkanResource*, SIZE>;
 
 public:
-    using const_iterator = FixedSizeArray::const_iterator;
+    using const_iterator = typename FixedSizeArray::const_iterator;
 
     inline ~FixedCapacityResourceSet() {
         clear();
@@ -328,8 +327,11 @@ private:
 using VulkanAcquireOnlyResourceManager
         = VulkanResourceManagerImpl<VulkanResource, FastIterationResourceSet>;
 using VulkanResourceManager = VulkanResourceManagerImpl<VulkanResource, ResourceSet>;
-using FixedSizeVulkanResourceManager
-        = VulkanResourceManagerImpl<VulkanResource, FixedCapacityResourceSet>;
+
+template<std::size_t SIZE>
+using FixedSizeVulkanResourceManager =
+        VulkanResourceManagerImpl<VulkanResource, FixedCapacityResourceSet<SIZE>>;
+
 using VulkanThreadSafeResourceManager
         = VulkanResourceManagerImpl<VulkanThreadSafeResource, ThreadSafeResourceSet>;
 
