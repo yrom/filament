@@ -34,16 +34,56 @@
 namespace filament::backend {
 
 class VulkanTimestamps;
+class VulkanSamplerCache;
 
 struct VulkanProgram : public HwProgram, VulkanResource {
+
     VulkanProgram(VkDevice device, const Program& builder) noexcept;
-    VulkanProgram(VkDevice device, VkShaderModule vs, VkShaderModule fs) noexcept;
+    VulkanProgram(VkDevice device, VkShaderModule vs, VkShaderModule fs,
+            utils::FixedCapacityVector<std::tuple<uint8_t, uint8_t, ShaderStageFlags>> const&
+                    samplerBindings) noexcept;
     ~VulkanProgram();
-    VulkanPipelineCache::ProgramBundle bundle;
-    Program::SamplerGroupInfo samplerGroupInfo;
+
+    inline VkShaderModule getVertexShader() const { return mInfo->shaders[0]; }
+
+    inline VkShaderModule getFragmentShader() const { return mInfo->shaders[1]; }
+
+    inline VulkanPipelineCache::UsageFlags getUsage() const { return mInfo->usage; }
+
+    inline utils::FixedCapacityVector<uint16_t> const& getBindingToSamplerIndex() const {
+        return mInfo->bindingToSamplerIndex;
+    }
+
+    inline VkSpecializationInfo const& getSpecConstInfo() const {
+        return mInfo->specializationInfo;
+    }
 
 private:
-    VkDevice mDevice;
+    // TODO: handle compute shaders.
+    // The expected order of shaders - from frontend to backend - is vertex, fragment, compute.
+    static constexpr uint8_t MAX_SHADER_MODULES = 2;
+
+    struct PipelineInfo {
+        PipelineInfo(size_t specConstsCount) :
+            bindingToSamplerIndex(MAX_SAMPLER_COUNT, 0xffff),
+            specConsts(specConstsCount, VkSpecializationMapEntry{}),
+            specConstData(new char[specConstsCount * 4])
+        {}
+
+        // This bitset maps to each of the sampler in the sampler groups associated with this
+        // program, and whether each sampler is used in which shader (i.e. vert, frag, compute).
+        VulkanPipelineCache::UsageFlags usage;
+
+        // We store the samplerGroupIndex as the top 8-bit and the index within each group as the lower 8-bit.
+        utils::FixedCapacityVector<uint16_t> bindingToSamplerIndex;
+        VkShaderModule shaders[MAX_SHADER_MODULES] = {VK_NULL_HANDLE};
+        VkSpecializationInfo specializationInfo = {};
+        utils::FixedCapacityVector<VkSpecializationMapEntry> specConsts;
+        std::unique_ptr<char[]> specConstData;
+    };
+
+    PipelineInfo* mInfo;
+    VkDevice mDevice = VK_NULL_HANDLE;
 };
 
 // The render target bundles together a set of attachments, each of which can have one of the
@@ -123,11 +163,79 @@ struct VulkanBufferObject : public HwBufferObject, VulkanResource {
 };
 
 struct VulkanSamplerGroup : public HwSamplerGroup, VulkanResource {
-    // NOTE: we have to use out-of-line allocation here because the size of a Handle<> is limited
-    std::unique_ptr<SamplerGroup> sb;// FIXME: this shouldn't depend on filament::SamplerGroup
-    explicit VulkanSamplerGroup(size_t size) noexcept
-        : VulkanResource(VulkanResourceType::SAMPLER_GROUP),
-          sb(new SamplerGroup(size)) {}
+
+    //using SamplerGroupResourceManager = FixedSizeVulkanResourceManager<MAX_SAMPLER_COUNT>;
+    using SamplerGroupResourceManager = VulkanAcquireOnlyResourceManager;
+    
+    VulkanSamplerGroup(VulkanResourceAllocator* allocator, VulkanSamplerCache* samplerCache,
+            size_t count);
+
+    explicit VulkanSamplerGroup(
+            utils::FixedCapacityVector<std::pair<VulkanTexture*, VkSampler>> const& samplers);
+
+    ~VulkanSamplerGroup() {
+        //        utils::slog.e <<"sample-group=" << this << " going out of scope" << utils::io::endl;
+    }
+
+    void update(SamplerDescriptor const* samplerGroup, size_t count);
+
+    VkDescriptorImageInfo const* getSamplerInfo() const { return mInfo->imageInfo.data(); }
+
+    inline bool hasDepthTexture(VulkanTexture* depthTexture) const {
+        //        utils::slog.e <<"hasdepth texture=" << depthTexture << " vk=" << depthTexture->getVkImage() << utils::io::endl;
+        //        for (auto d : mInfo->depthTextures) {
+        //            utils::slog.e <<"d=" << d << " vk=" << d->getVkImage() << utils::io::endl;
+        //        }
+        auto ret = mInfo->depthTextures.find(depthTexture) != mInfo->depthTextures.end();
+        //        utils::slog.e <<"hasdepth return=" << ret << utils::io::endl;
+        return ret;
+    }
+
+    // Transition depth textures to samplers
+    inline void transitionDepthSamplers(VkCommandBuffer cmdbuffer) const {
+        for (auto texture: mInfo->depthTextures) {
+            auto range = texture->getFullViewRange();
+            // Transition each level one-by-one
+            for (uint32_t i = range.baseMipLevel; i < range.levelCount; ++i) {
+                texture->transitionLayout(cmdbuffer,
+                                          {
+                                              .aspectMask = range.aspectMask,
+                                              .baseMipLevel = i,
+                                              .levelCount = 1,
+                                              .baseArrayLayer = range.baseArrayLayer,
+                                              .layerCount = 1
+                                          },
+                                          VulkanLayout::DEPTH_SAMPLER);
+            }
+        }
+    }
+
+    // This is for copying the resources held by this sampler group into the descriptor set (since descriptor sets can be cached).
+    SamplerGroupResourceManager& getResources() { return mResources; }
+    VulkanTexture* const* getTextures() {
+        return mInfo->textures.data();
+    }
+
+private:
+    struct PipelineInfo {
+        template<typename TYPE>
+        using Array = utils::FixedCapacityVector<TYPE>;
+        PipelineInfo(size_t size)
+            : imageInfo(size, VkDescriptorImageInfo {}),
+              textures(size, nullptr) {}
+        Array<VkDescriptorImageInfo> imageInfo;
+        Array<VulkanTexture*> textures;
+        std::unordered_set<VulkanTexture*> depthTextures;
+    };
+
+    void update(size_t index);
+
+    VulkanSamplerCache* mSamplerCache;
+    VulkanResourceAllocator* mResourceAllocator;
+    PipelineInfo* mInfo = nullptr;
+    // MAX_SAMPLER_COUNT corresponds to the maximum number of textsures that the sampler group can
+    // reference
+    SamplerGroupResourceManager mResources;
 };
 
 struct VulkanRenderPrimitive : public HwRenderPrimitive, VulkanResource {

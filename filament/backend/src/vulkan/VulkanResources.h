@@ -185,7 +185,7 @@ public:
     }
 
     inline const_iterator find(VulkanResource* resource) {
-        return std::find(mArray.begin(), mArray.end(), resource);
+        return std::find(begin(), end(), resource);
     }
 
     inline void insert(VulkanResource* resource) {
@@ -204,9 +204,58 @@ public:
         mInd = 0;
     }
 
+    inline size_t size() {
+        return mInd;
+    }
+
 private:
     FixedSizeArray mArray{nullptr};
     size_t mInd = 0;
+    /*
+private:
+    using FixedSizeArray = std::vector<VulkanResource*>;
+
+public:
+    using const_iterator = typename FixedSizeArray::const_iterator;
+
+    inline ~FixedCapacityResourceSet() {
+        clear();
+    }
+
+    inline const_iterator begin() {
+        return mArray.cbegin();
+    }
+
+    inline const_iterator end() {
+        return mArray.cend();
+    }
+
+    inline const_iterator find(VulkanResource* resource) {
+        return std::find(begin(), end(), resource);
+    }
+
+    inline void insert(VulkanResource* resource) {
+        //utils::slog.e <<"this=" << this << " inserting=" << resource << utils::io::endl;
+        //        assert_invariant(mInd < SIZE);
+        //        mArray[mInd++] = resource;
+        mArray.push_back(resource);
+    }
+
+    inline void erase(VulkanResource* resource) {
+        assert_invariant(false && "FixedCapacityResourceSet::erase should not be called");
+    }
+
+    inline void clear() {
+        mArray.clear();
+    }
+
+    inline size_t size() {
+        return mArray.size();
+    }
+
+private:
+    FixedSizeArray mArray{};
+    */
 };
 
 // robin_set/map are useful for sets that are acquire only and the set will be iterated when the set
@@ -271,14 +320,21 @@ public:
     }
 
     // Transfers ownership from one resource set to another
-    inline void acquire(VulkanResourceManagerImpl<ResourceType, SetType>* srcResources) {
+    template <typename tSetType>    
+    inline void acquireAll(VulkanResourceManagerImpl<ResourceType, tSetType>* srcResources) {
+        copyAll(srcResources);
+        srcResources->clear();
+    }
+
+    // Transfers ownership from one resource set to another
+    template <typename tSetType>
+    inline void copyAll(VulkanResourceManagerImpl<ResourceType, tSetType>* srcResources) {
         LOCK_IF_NEEDED();
         for (auto iter = srcResources->mResources.begin(); iter != srcResources->mResources.end();
                 iter++) {
             acquire(*iter);
         }
         UNLOCK_IF_NEEDED();
-        srcResources->clear();
     }
 
     inline void release(ResourceType* resource) {
@@ -299,6 +355,7 @@ public:
 
     inline void clear() {
         LOCK_IF_NEEDED();
+        //utils::slog.e <<"resourceman=" << &mResources << " size=" << mResources.size() << utils::io::endl;
         for (auto iter = mResources.begin(); iter != mResources.end(); iter++) {
             derefImpl(*iter);
         }
@@ -322,6 +379,8 @@ private:
     VulkanResourceAllocator* mAllocator;
     SetType mResources;
     std::unique_ptr<utils::Mutex> mMutex;
+
+    template <typename, typename> friend class VulkanResourceManagerImpl;
 };
 
 using VulkanAcquireOnlyResourceManager

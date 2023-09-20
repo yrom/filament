@@ -34,9 +34,26 @@ using namespace bluevk;
 
 namespace filament::backend {
 
-static VulkanPipelineCache::RasterState createDefaultRasterState();
+namespace {
 
-static VkShaderStageFlags getShaderStageFlags(VulkanPipelineCache::UsageFlags key, uint16_t binding) {
+VulkanPipelineCache::RasterState createDefaultRasterState() {
+    return VulkanPipelineCache::RasterState{
+            .cullMode = VK_CULL_MODE_NONE,
+            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .depthBiasEnable = VK_FALSE,
+            .blendEnable = VK_FALSE,
+            .depthWriteEnable = VK_TRUE,
+            .alphaToCoverageEnable = true,
+            .colorWriteMask = 0xf,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+            .colorTargetCount = 1,
+            .depthCompareOp = SamplerCompareFunc::LE,
+            .depthBiasConstantFactor = 0.0f,
+            .depthBiasSlopeFactor = 0.0f,
+    };
+}
+
+VkShaderStageFlags getShaderStageFlags(VulkanPipelineCache::UsageFlags key, uint16_t binding) {
     // NOTE: if you modify this function, you also need to modify getUsageFlags.
     assert_invariant(binding < MAX_SAMPLER_COUNT);
     VkShaderStageFlags flags = 0;
@@ -47,6 +64,28 @@ static VkShaderStageFlags getShaderStageFlags(VulkanPipelineCache::UsageFlags ke
         flags |= VK_SHADER_STAGE_FRAGMENT_BIT;
     }
     return flags;
+}
+
+    /*VulkanPipelineCache::UsageFlags unsetUsageFlags(uint16_t binding, VulkanPipelineCache::UsageFlags src) {
+    src.unset(binding);
+    src.unset(binding + MAX_SAMPLER_COUNT);
+    return src;
+    }
+
+std::string bitset128String(utils::bitset128 const& layout) {
+    std::string ret;
+    ret.resize(128);
+    for (size_t i=0; i < 128; i++) {
+        if (layout.test(i)) {
+            ret[i] = '1';
+        } else {
+            ret[i] = '0';
+        }
+    }
+    return ret;
+}
+    */
+
 }
 
 VulkanPipelineCache::UsageFlags
@@ -68,7 +107,8 @@ VulkanPipelineCache::getUsageFlags(uint16_t binding, ShaderStageFlags flags, Usa
 VulkanPipelineCache::VulkanPipelineCache(VulkanResourceAllocator* allocator)
     : mCurrentRasterState(createDefaultRasterState()),
       mResourceAllocator(allocator),
-      mPipelineBoundResources(allocator) {
+      mPipelineBoundResources(allocator),
+      mDescriptorSetBoundResources(allocator) {
     mDummyBufferWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     mDummyBufferWriteInfo.pNext = nullptr;
     mDummyBufferWriteInfo.dstArrayElement = 0;
@@ -78,7 +118,6 @@ VulkanPipelineCache::VulkanPipelineCache(VulkanResourceAllocator* allocator)
     mDummyBufferWriteInfo.pBufferInfo = &mDummyBufferInfo;
     mDummyBufferWriteInfo.pTexelBufferView = nullptr;
 
-    mDummyTargetInfo.imageLayout = VulkanImageUtility::getVkLayout(VulkanLayout::READ_ONLY);
     mDummyTargetWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     mDummyTargetWriteInfo.pNext = nullptr;
     mDummyTargetWriteInfo.dstArrayElement = 0;
@@ -94,7 +133,8 @@ VulkanPipelineCache::~VulkanPipelineCache() {
     // be explicit about teardown order of various components.
 }
 
-void VulkanPipelineCache::setDevice(VkDevice device, VmaAllocator allocator) {
+void VulkanPipelineCache::initialize(VkDevice device, VmaAllocator allocator,
+        VkImageView dummyImageView, VkSampler dummySampler) {
     assert_invariant(mDevice == VK_NULL_HANDLE);
     mDevice = device;
     mAllocator = allocator;
@@ -115,10 +155,28 @@ void VulkanPipelineCache::setDevice(VkDevice device, VmaAllocator allocator) {
 
     mDummyBufferInfo.buffer = mDummyBuffer;
     mDummyBufferInfo.range = bufferInfo.size;
+
+    mDummyTargetInfo = {
+        .sampler = dummySampler,
+        .imageView = dummyImageView,
+        .imageLayout = VulkanImageUtility::getVkLayout(VulkanLayout::READ_WRITE),
+    };
 }
 
 bool VulkanPipelineCache::bindDescriptors(VkCommandBuffer cmdbuffer) noexcept {
     DescriptorMap::iterator descriptorIter = mDescriptorSets.find(mDescriptorRequirements);
+    /*
+    utils::slog.e <<"bindDescriptors: samplers" << utils::io::endl;
+    for (size_t i = 0; i < SAMPLER_BINDING_COUNT; ++i) {
+        auto& sampler = mDescriptorRequirements.samplers[i];
+        utils::slog.e <<"sampler[" << i << "]" <<
+            " vksampler=" << sampler.sampler <<
+            " vkimageview=" << sampler.imageView <<
+            " vkimageLayout=" << sampler.imageLayout <<
+            utils::io::endl;
+    }
+    utils::slog.e <<"bindDescriptors: samplers ----------" << utils::io::endl;
+    */
 
     // Check if the required descriptors are already bound. If so, there's no need to do anything.
     if (DescEqual equals; UTILS_LIKELY(equals(mBoundDescriptor, mDescriptorRequirements))) {
@@ -148,18 +206,11 @@ bool VulkanPipelineCache::bindDescriptors(VkCommandBuffer cmdbuffer) noexcept {
 
     cacheEntry->lastUsed = mCurrentTime;
     mBoundDescriptor = mDescriptorRequirements;
-    // This passes the currently "bound" uniform buffer objects to pipeline that will be used in the
-    // draw call.
-    auto resourceEntry = mDescriptorResources.find(cacheEntry->id);
-    if (resourceEntry == mDescriptorResources.end()) {
-        mDescriptorResources[cacheEntry->id]
-                = std::make_unique<VulkanAcquireOnlyResourceManager>(mResourceAllocator);
-        resourceEntry = mDescriptorResources.find(cacheEntry->id);
-    }
-    resourceEntry->second->acquire(&mPipelineBoundResources);
 
+    auto pipeline = getOrCreatePipelineLayout()->handle;
+//    utils::slog.e <<"binding descriptorset=" << cacheEntry->handles[1] <<" pipeline=" << pipeline << utils::io::endl;
     vkCmdBindDescriptorSets(cmdbuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            getOrCreatePipelineLayout()->handle, 0, VulkanPipelineCache::DESCRIPTOR_TYPE_COUNT,
+            pipeline, 0, VulkanPipelineCache::DESCRIPTOR_TYPE_COUNT,
             cacheEntry->handles.data(), 0, nullptr);
 
     return true;
@@ -206,10 +257,21 @@ void VulkanPipelineCache::bindScissor(VkCommandBuffer cmdbuffer, VkRect2D scisso
 VulkanPipelineCache::DescriptorCacheEntry* VulkanPipelineCache::createDescriptorSets() noexcept {
     PipelineLayoutCacheEntry* layoutCacheEntry = getOrCreatePipelineLayout();
 
+    auto const cacheId = mDescriptorCacheEntryCount++;
     DescriptorCacheEntry descriptorCacheEntry = {
         .pipelineLayout = mPipelineRequirements.layout,
-        .id = mDescriptorCacheEntryCount++,
+        .id = cacheId,
     };
+
+    // This passes the currently "bound" uniform buffer objects to pipeline that will be used in the
+    // draw call.
+    auto resourceEntry = mDescriptorResources.find(cacheId);
+    if (resourceEntry == mDescriptorResources.end()) {
+        mDescriptorResources[cacheId]
+                = std::make_unique<VulkanAcquireOnlyResourceManager>(mResourceAllocator);
+        resourceEntry = mDescriptorResources.find(cacheId);
+    }
+    resourceEntry->second->acquireAll(&mDescriptorSetBoundResources);
 
     // Each of the arenas for this particular layout are guaranteed to have the same size. Check
     // the first arena to see if any descriptor sets are available that can be re-claimed. If not,
@@ -233,9 +295,15 @@ VulkanPipelineCache::DescriptorCacheEntry* VulkanPipelineCache::createDescriptor
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         allocInfo.descriptorPool = mDescriptorPool;
         allocInfo.descriptorSetCount = DESCRIPTOR_TYPE_COUNT;
-        allocInfo.pSetLayouts = layoutCacheEntry->descriptorSetLayouts.data();
+        auto& layouts = layoutCacheEntry->descriptorSetLayouts;
+        allocInfo.pSetLayouts = layouts.data();
         VkResult error = vkAllocateDescriptorSets(mDevice, &allocInfo,
-                descriptorCacheEntry.handles.data());
+                                                  descriptorCacheEntry.handles.data());
+        //        utils::slog.e <<"allocating descriptors for pipeline-layout=" << layoutCacheEntry->handle
+        //                      <<" with layout=" << layouts[1]
+        //                      <<" result-descriptor-obj=" << descriptorCacheEntry.handles[1] <<
+        //            utils::io::endl;
+
         assert_invariant(error == VK_SUCCESS);
         if (error != VK_SUCCESS) {
             return nullptr;
@@ -245,6 +313,7 @@ VulkanPipelineCache::DescriptorCacheEntry* VulkanPipelineCache::createDescriptor
             descriptorCacheEntry.handles[i] = descriptorSetArenas[i].back();
             descriptorSetArenas[i].pop_back();
         }
+        //        utils::slog.e <<"using cached-descriptor-obj=" << descriptorCacheEntry.handles[1] << utils::io::endl;
         assert_invariant(mDescriptorArenasCount > 0);
         mDescriptorArenasCount--;
     }
@@ -324,6 +393,17 @@ VulkanPipelineCache::DescriptorCacheEntry* VulkanPipelineCache::createDescriptor
 
     vkUpdateDescriptorSets(mDevice, nwrites, writes, 0, nullptr);
 
+    //    utils::slog.e <<"createDescriptorSet: samplers descriptor-obj=" << descriptorCacheEntry.handles[1] << utils::io::endl;
+    //    for (size_t i = 0; i < SAMPLER_BINDING_COUNT; ++i) {
+    //        auto& sampler = mDescriptorRequirements.samplers[i];
+    //        utils::slog.e <<"sampler[" << i << "]" <<
+    //            " vksampler=" << sampler.sampler <<
+    //            " vkimageview=" << sampler.imageView <<
+    //            " vkimageLayout=" << sampler.imageLayout <<
+    //            utils::io::endl;
+    //    }
+    //    utils::slog.e <<"createDescriptorSet: samplers ----------" << utils::io::endl;
+
     return &mDescriptorSets.emplace(mDescriptorRequirements, descriptorCacheEntry).first.value();
 }
 
@@ -353,9 +433,9 @@ VulkanPipelineCache::PipelineCacheEntry* VulkanPipelineCache::createPipeline() n
 
     // If we reach this point, we need to create and stash a brand new pipeline object.
     shaderStages[0].module = mPipelineRequirements.shaders[0];
-    shaderStages[0].pSpecializationInfo = mSpecializationRequirements;
+    shaderStages[0].pSpecializationInfo = &mSpecializationRequirements;
     shaderStages[1].module = mPipelineRequirements.shaders[1];
-    shaderStages[1].pSpecializationInfo = mSpecializationRequirements;
+    shaderStages[1].pSpecializationInfo = &mSpecializationRequirements;
 
     // Expand our size-optimized structs into the proper Vk structs.
     uint32_t numVertexAttribs = 0;
@@ -493,13 +573,28 @@ VulkanPipelineCache::PipelineCacheEntry* VulkanPipelineCache::createPipeline() n
         return nullptr;
     }
 
+    // This passes the currently "bound" uniform buffer objects to pipeline that will be used in the
+    // draw call.
+    auto resourceEntry = mPipelineResources.find(cacheEntry.handle);
+    if (resourceEntry == mPipelineResources.end()) {
+        mPipelineResources[cacheEntry.handle]
+                = std::make_unique<VulkanAcquireOnlyResourceManager>(mResourceAllocator);
+        resourceEntry = mPipelineResources.find(cacheEntry.handle);
+    }
+    resourceEntry->second->acquireAll(&mPipelineBoundResources);
+
     return &mPipelines.emplace(mPipelineRequirements, cacheEntry).first.value();
 }
 
 VulkanPipelineCache::PipelineLayoutCacheEntry* VulkanPipelineCache::getOrCreatePipelineLayout() noexcept {
     auto iter = mPipelineLayouts.find(mPipelineRequirements.layout);
+    //    utils::slog.e <<"getOrCreatePipelineLayout: layout=" <<
+    //        bitset128String(mPipelineRequirements.layout) << utils::io::endl;
     if (UTILS_LIKELY(iter != mPipelineLayouts.end())) {
-        return &iter.value();
+        auto ret = &iter.value();
+        //        utils::slog.e <<"found cached descriptor-set-layout=" << ret->descriptorSetLayouts[1] <<
+        //            " pipeline-layout=" << ret->handle << utils::io::endl;
+        return ret;
     }
 
     PipelineLayoutCacheEntry cacheEntry = {};
@@ -522,16 +617,21 @@ VulkanPipelineCache::PipelineLayoutCacheEntry* VulkanPipelineCache::getOrCreateP
     vkCreateDescriptorSetLayout(mDevice, &dlinfo, VKALLOC, &cacheEntry.descriptorSetLayouts[0]);
 
     // Next create the descriptor set layout for samplers.
+    //    utils::slog.e<<"about to create descriptor set" << utils::io::endl;
     VkDescriptorSetLayoutBinding sbindings[SAMPLER_BINDING_COUNT];
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     for (uint32_t i = 0; i < SAMPLER_BINDING_COUNT; i++) {
         binding.stageFlags = getShaderStageFlags(mPipelineRequirements.layout, i);
         binding.binding = i;
+        //        utils::slog.e <<"descriptor set binding=" << i << " stageFlags=" << binding.stageFlags << utils::io::endl;
         sbindings[i] = binding;
     }
     dlinfo.bindingCount = SAMPLER_BINDING_COUNT;
     dlinfo.pBindings = sbindings;
     vkCreateDescriptorSetLayout(mDevice, &dlinfo, VKALLOC, &cacheEntry.descriptorSetLayouts[1]);
+    //    utils::slog.e<<"created descriptor set layout:" << cacheEntry.descriptorSetLayouts[1]
+    //                 <<" with layout=" << bitset128String(mPipelineRequirements.layout) <<
+    //        utils::io::endl;
 
     // Next create the descriptor set layout for input attachments.
     VkDescriptorSetLayoutBinding tbindings[INPUT_ATTACHMENT_COUNT];
@@ -552,18 +652,23 @@ VulkanPipelineCache::PipelineLayoutCacheEntry* VulkanPipelineCache::getOrCreateP
     pPipelineLayoutCreateInfo.pSetLayouts = cacheEntry.descriptorSetLayouts.data();
     VkResult result = vkCreatePipelineLayout(mDevice, &pPipelineLayoutCreateInfo, VKALLOC,
             &cacheEntry.handle);
+
+    //    utils::slog.e<<"bounds descriptorSetLayout=" << cacheEntry.descriptorSetLayouts[1] <<
+    //        " to pipelinelayout=" << cacheEntry.handle << utils::io::endl;
+
+    
+
     if (UTILS_UNLIKELY(result != VK_SUCCESS)) {
         return nullptr;
     }
     return &mPipelineLayouts.emplace(mPipelineRequirements.layout, cacheEntry).first.value();
 }
 
-void VulkanPipelineCache::bindProgram(const VulkanProgram& program) noexcept {
-    const VkShaderModule shaders[2] = { program.bundle.vertex, program.bundle.fragment };
-    for (uint32_t ssi = 0; ssi < SHADER_MODULE_COUNT; ssi++) {
-        mPipelineRequirements.shaders[ssi] = shaders[ssi];
-    }
-    mSpecializationRequirements = program.bundle.specializationInfos;
+void VulkanPipelineCache::bindProgram(VulkanProgram* program) noexcept {
+    mPipelineRequirements.shaders[0] =  program->getVertexShader();
+    mPipelineRequirements.shaders[1] =  program->getFragmentShader();
+    mSpecializationRequirements = program->getSpecConstInfo();
+    //    mPipelineBoundResources.acquire(program);
 }
 
 void VulkanPipelineCache::bindRasterState(const RasterState& rasterState) noexcept {
@@ -623,7 +728,7 @@ void VulkanPipelineCache::unbindImageView(VkImageView imageView) noexcept {
 void VulkanPipelineCache::bindUniformBufferObject(uint32_t bindingIndex,
         VulkanBufferObject* bufferObject, VkDeviceSize offset, VkDeviceSize size) noexcept {
     bindUniformBuffer(bindingIndex, bufferObject->buffer.getGpuBuffer(), offset, size);
-    mPipelineBoundResources.acquire(bufferObject);
+    mDescriptorSetBoundResources.acquire(bufferObject);
 }
 
 void VulkanPipelineCache::bindUniformBuffer(uint32_t bindingIndex, VkBuffer buffer,
@@ -645,15 +750,75 @@ void VulkanPipelineCache::bindUniformBuffer(uint32_t bindingIndex, VkBuffer buff
     key.uniformBufferSizes[bindingIndex] = size;
 }
 
-void VulkanPipelineCache::bindSamplers(VkDescriptorImageInfo samplers[SAMPLER_BINDING_COUNT],
-        VulkanTexture* textures[SAMPLER_BINDING_COUNT], UsageFlags flags) noexcept {
-    for (uint32_t bindingIndex = 0; bindingIndex < SAMPLER_BINDING_COUNT; bindingIndex++) {
-        mDescriptorRequirements.samplers[bindingIndex] = samplers[bindingIndex];
-        if (textures[bindingIndex]) {
-            mPipelineBoundResources.acquire(textures[bindingIndex]);
+void VulkanPipelineCache::bindSamplers(VulkanCommandBuffer* commands, VulkanSamplerGroup* const* samplerGroups, VulkanProgram* program) {
+    //    utils::slog.e <<"bind samplers" << utils::io::endl;
+    auto const& bindingToSamplerIndex = program->getBindingToSamplerIndex();
+    //    UsageFlags usage = program->getUsage();
+    UsageFlags programUsage = program->getUsage();
+    UsageFlags usage;
+    std::array<bool, SAMPLER_BINDING_COUNT> groups = { false };
+    for (uint32_t bindingIndex = 0; bindingIndex < SAMPLER_BINDING_COUNT; ++bindingIndex) {
+        auto const val = bindingToSamplerIndex[bindingIndex];
+        if (val == 0xffff) {
+            mDescriptorRequirements.samplers[bindingIndex] = mDummyTargetInfo;
+            continue;
+        }
+        uint8_t const groupInd = static_cast<uint8_t>(val >> 8);
+        uint8_t const samplerInd = static_cast<uint8_t>(val & 0xff);
+        auto samplerGroup = samplerGroups[groupInd];
+        if (!samplerGroup) {
+            mDescriptorRequirements.samplers[bindingIndex] = mDummyTargetInfo;
+            continue;
+        }
+        auto const* samplers = samplerGroup->getSamplerInfo();
+        //        auto const* textures = samplerGroup->getTextures();
+
+        if (samplers[samplerInd].sampler == VK_NULL_HANDLE ||
+            samplers[samplerInd].imageView == VK_NULL_HANDLE) {
+            mDescriptorRequirements.samplers[bindingIndex] = mDummyTargetInfo;
+            if (programUsage.test(bindingIndex)) {
+                usage.set(bindingIndex);
+            }
+            if (programUsage.test(bindingIndex + MAX_SAMPLER_COUNT)) {
+                usage.set(bindingIndex + MAX_SAMPLER_COUNT);
+            }
+            //            utils::slog.e <<"hack binding=" << bindingIndex << " group=" << samplerGroup << " sampler=" << samplers[samplerInd].sampler
+            //                      <<" imageView=" << samplers[samplerInd].imageView
+            //                      <<" imageLayout=" << samplers[samplerInd].imageLayout
+            //                      << utils::io::endl;
+
+
+            continue;
+        }
+        groups[groupInd] = true;
+        
+        if (programUsage.test(bindingIndex)) {
+            usage.set(bindingIndex);
+        }
+        if (programUsage.test(bindingIndex + MAX_SAMPLER_COUNT)) {
+            usage.set(bindingIndex + MAX_SAMPLER_COUNT);
+        }
+        mDescriptorRequirements.samplers[bindingIndex] = samplers[samplerInd];
+        //        utils::slog.e <<"binding=" << bindingIndex << " group=" << samplerGroup << " sampler=" << samplers[samplerInd].sampler
+        //                      <<" imageView=" << samplers[samplerInd].imageView
+        //                      <<" imageLayout=" << samplers[samplerInd].imageLayout
+        //                      << utils::io::endl;
+
+        // We cannot just acquire the samplerGroup here because they can be "updated". 
+        //mDescriptorSetBoundResources.acquire(samplerGroup);
+    }
+
+    for (uint8_t i = 0; i < groups.size(); i++) {
+        if (groups[i]) {
+            commands->acquire(samplerGroups[i]);
         }
     }
-    mPipelineRequirements.layout = flags;
+    
+    mDescriptorRequirements.layout = usage;
+    //mPipelineRequirements.layout = program->getUsage();
+    mPipelineRequirements.layout = usage;
+//    utils::slog.e <<"binding with usage=" << bitset128String(mPipelineRequirements.layout) << utils::io::endl;
+//    utils::slog.e <<"bind samplers end" << utils::io::endl;
 }
 
 void VulkanPipelineCache::bindInputAttachment(uint32_t bindingIndex,
@@ -670,7 +835,7 @@ void VulkanPipelineCache::terminate() noexcept {
     for (auto& iter : mPipelines) {
         vkDestroyPipeline(mDevice, iter.second.handle, VKALLOC);
     }
-    mPipelineBoundResources.clear();
+    mDescriptorSetBoundResources.clear();
     mPipelines.clear();
     mBoundPipeline = {};
     vmaDestroyBuffer(mAllocator, mDummyBuffer, mDummyMemory);
@@ -717,7 +882,9 @@ void VulkanPipelineCache::onCommandBuffer(const VulkanCommandBuffer& commands) {
     for (ConstPipeIterator iter = mPipelines.begin(); iter != mPipelines.end();) {
         const PipelineCacheEntry& cacheEntry = iter.value();
         if (cacheEntry.lastUsed + FVK_MAX_PIPELINE_AGE < mCurrentTime) {
-            vkDestroyPipeline(mDevice, iter->second.handle, VKALLOC);
+            auto const pipeline = iter->second.handle;
+            vkDestroyPipeline(mDevice, pipeline, VKALLOC);
+            mPipelineResources.erase(pipeline);
             iter = mPipelines.erase(iter);
         } else {
             ++iter;
@@ -906,23 +1073,6 @@ bool VulkanPipelineCache::DescEqual::operator()(const DescriptorKey& k1,
         }
     }
     return true;
-}
-
-static VulkanPipelineCache::RasterState createDefaultRasterState() {
-    return VulkanPipelineCache::RasterState {
-        .cullMode = VK_CULL_MODE_NONE,
-        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        .depthBiasEnable = VK_FALSE,
-        .blendEnable = VK_FALSE,
-        .depthWriteEnable = VK_TRUE,
-        .alphaToCoverageEnable = true,
-        .colorWriteMask = 0xf,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-        .colorTargetCount = 1,
-        .depthCompareOp = SamplerCompareFunc::LE,
-        .depthBiasConstantFactor = 0.0f,
-        .depthBiasSlopeFactor = 0.0f,
-    };
 }
 
 } // namespace filament::backend

@@ -95,7 +95,8 @@ getVkTransition(const VulkanLayoutTransition& transition) {
         case VulkanLayout::DEPTH_ATTACHMENT:
             srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
                             | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            srcStage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
             break;
         case VulkanLayout::DEPTH_SAMPLER:
             srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
@@ -125,7 +126,7 @@ getVkTransition(const VulkanLayoutTransition& transition) {
             break;
         case VulkanLayout::READ_ONLY:
             dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
             break;
         case VulkanLayout::TRANSFER_SRC:
             dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -144,7 +145,8 @@ getVkTransition(const VulkanLayoutTransition& transition) {
             dstAccessMask
                     = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                       | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+                       | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                ;
             break;
         case VulkanLayout::PRESENT:
         case VulkanLayout::COLOR_ATTACHMENT_RESOLVE:

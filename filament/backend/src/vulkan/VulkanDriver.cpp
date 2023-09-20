@@ -111,7 +111,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugReportCallback(VkDebugReportFlagsEXT flags,
         if (strstr(pMessage, "ALL_GRAPHICS_BIT") || strstr(pMessage, "ALL_COMMANDS_BIT")) {
             return VK_FALSE;
         }
-        utils::slog.w << "VULKAN WARNING: (" << pLayerPrefix << ") " << pMessage << utils::io::endl;
+        utils::slog.e << "VULKAN WARNING: (" << pLayerPrefix << ") " << pMessage << utils::io::endl;
     }
     utils::slog.e << utils::io::endl;
     return VK_FALSE;
@@ -129,7 +129,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugUtilsCallback(VkDebugUtilsMessageSeverityFla
                 || strstr(cbdata->pMessage, "ALL_COMMANDS_BIT")) {
             return VK_FALSE;
         }
-        utils::slog.w << "VULKAN WARNING: (" << cbdata->pMessageIdName << ") " << cbdata->pMessage
+        utils::slog.e << "VULKAN WARNING: (" << cbdata->pMessageIdName << ") " << cbdata->pMessage
                       << utils::io::endl;
     }
     utils::slog.e << utils::io::endl;
@@ -191,8 +191,6 @@ VulkanDriver::VulkanDriver(VulkanPlatform* platform, VulkanContext const& contex
     mCommands = std::make_unique<VulkanCommands>(mPlatform->getDevice(),
             mPlatform->getGraphicsQueue(), mPlatform->getGraphicsQueueFamilyIndex(), &mContext,
             &mResourceAllocator);
-    mCommands->setObserver(&mPipelineCache);
-    mPipelineCache.setDevice(mPlatform->getDevice(), mAllocator);
 
     // TOOD: move them all to be initialized by constructor
     mStagePool.initialize(mAllocator, mCommands.get());
@@ -202,7 +200,11 @@ VulkanDriver::VulkanDriver(VulkanPlatform* platform, VulkanContext const& contex
     mEmptyTexture.reset(createEmptyTexture(mPlatform->getDevice(), mPlatform->getPhysicalDevice(),
             mContext, mAllocator, mCommands.get(), mStagePool));
 
-    mPipelineCache.setDummyTexture(mEmptyTexture->getPrimaryImageView());
+    //    mPipelineCache.setDummyTexture(mEmptyTexture->getPrimaryImageView());
+    mPipelineCache.initialize(mPlatform->getDevice(), mAllocator,
+            mEmptyTexture->getPrimaryImageView(), mSamplerCache.getSampler({}));
+    mCommands->setObserver(&mPipelineCache);
+
     mBlitter.initialize(mPlatform->getPhysicalDevice(), mPlatform->getDevice(), mAllocator,
             mCommands.get(), mEmptyTexture.get());
 }
@@ -290,9 +292,7 @@ void VulkanDriver::setPresentationTime(int64_t monotonic_clock_ns) {
 }
 
 void VulkanDriver::endFrame(uint32_t frameId) {
-    if (mCommands->flush()) {
-        collectGarbage();
-    }
+    //    mCommands->flush();
 }
 
 void VulkanDriver::flush(int) {
@@ -314,7 +314,8 @@ void VulkanDriver::finish(int dummy) {
 }
 
 void VulkanDriver::createSamplerGroupR(Handle<HwSamplerGroup> sbh, uint32_t count) {
-    auto sg = mResourceAllocator.construct<VulkanSamplerGroup>(sbh, count);
+    auto sg = mResourceAllocator.construct<VulkanSamplerGroup>(sbh, &mResourceAllocator,
+            &mSamplerCache, count);
     mResourceManager.acquire(sg);
 }
 
@@ -965,17 +966,10 @@ bool VulkanDriver::canGenerateMipmaps() {
 
 void VulkanDriver::updateSamplerGroup(Handle<HwSamplerGroup> sbh,
         BufferDescriptor&& data) {
+    SamplerDescriptor const* samplers = static_cast<SamplerDescriptor const*>(data.buffer);
+    size_t count = data.size / sizeof(SamplerDescriptor);
     auto* sb = mResourceAllocator.handle_cast<VulkanSamplerGroup*>(sbh);
-
-    // FIXME: we shouldn't be using SamplerGroup here, instead the backend should create
-    //        a descriptor or any internal data-structure that represents the textures/samplers.
-    //        It's preferable to do as much work as possible here.
-    //        Here, we emulate the older backend API by re-creating a SamplerGroup from the
-    //        passed data.
-    SamplerGroup samplerGroup(data.size / sizeof(SamplerDescriptor));
-    memcpy(samplerGroup.data(), data.buffer, data.size);
-    *sb->sb = std::move(samplerGroup);
-
+    sb->update(samplers, count);
     scheduleDestroy(std::move(data));
 }
 
@@ -989,6 +983,8 @@ void VulkanDriver::compilePrograms(CompilerPriorityQueue priority,
 void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassParams& params) {
     FVK_SYSTRACE_CONTEXT();
     FVK_SYSTRACE_START("beginRenderPass");
+
+    //    utils::slog.e <<"begin render pass" << utils::io::endl;
 
     VulkanRenderTarget* const rt = mResourceAllocator.handle_cast<VulkanRenderTarget*>(rth);
     const VkExtent2D extent = rt->getExtent();
@@ -1015,68 +1011,56 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassP
     }
 #endif
 
-    // We need to determine whether the same depth texture is both sampled and set as an attachment.
-    // If that's the case, we need to change the layout of the texture to DEPTH_SAMPLER, which is a
-    // more general layout. Otherwise, we prefer the DEPTH_ATTACHMENT layout, which is optimal for
-    // the non-sampling case.
-    bool samplingDepthAttachment = false;
     VulkanCommandBuffer& commands = mCommands->get();
     VkCommandBuffer const cmdbuffer = commands.buffer();
 
-    UTILS_NOUNROLL
-    for (uint8_t samplerGroupIdx = 0; samplerGroupIdx < Program::SAMPLER_BINDING_COUNT;
-            samplerGroupIdx++) {
-        VulkanSamplerGroup* vksb = mSamplerBindings[samplerGroupIdx];
-        if (!vksb) {
-            continue;
-        }
-        SamplerGroup* sb = vksb->sb.get();
-        for (size_t i = 0; i < sb->getSize(); i++) {
-            SamplerDescriptor const* boundSampler = sb->data() + i;
-            if (UTILS_LIKELY(boundSampler->t)) {
-                VulkanTexture* texture
-                        = mResourceAllocator.handle_cast<VulkanTexture*>(boundSampler->t);
-                if (!any(texture->usage & TextureUsage::DEPTH_ATTACHMENT)) {
-                    continue;
-                }
-                samplingDepthAttachment
-                        = depth.texture && texture->getVkImage() == depth.texture->getVkImage();
-                if (texture->getPrimaryImageLayout() == VulkanLayout::DEPTH_SAMPLER) {
-                    continue;
-                }
-                VkImageSubresourceRange const subresources{
-                        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                        .baseMipLevel = 0,
-                        .levelCount = texture->levels,
-                        .baseArrayLayer = 0,
-                        .layerCount = texture->depth,
-                };
-                commands.acquire(texture);
-                texture->transitionLayout(cmdbuffer, subresources, VulkanLayout::DEPTH_SAMPLER);
-                break;
-            }
-        }
-    }
-    // currentDepthLayout tracks state of the layout after the (potential) transition in the above block.
     VulkanLayout currentDepthLayout = depth.getLayout();
-    VulkanLayout const renderPassDepthLayout = samplingDepthAttachment
-                                                       ? VulkanLayout::DEPTH_SAMPLER
-                                                       : VulkanLayout::DEPTH_ATTACHMENT;
-    VulkanLayout const finalDepthLayout = renderPassDepthLayout;
-
+    VulkanLayout renderPassDepthLayout = VulkanLayout::DEPTH_ATTACHMENT;
     TargetBufferFlags clearVal = params.flags.clear;
     TargetBufferFlags discardEndVal = params.flags.discardEnd;
+
+    //    utils::slog.e <<"current depth layout: level=" << static_cast<int32_t>(depth.level)
+    //                  << " " << currentDepthLayout << utils::io::endl;
+
     if (depth.texture) {
-        if (params.readOnlyDepthStencil & RenderPassParams::READONLY_DEPTH) {
-            discardEndVal &= ~TargetBufferFlags::DEPTH;
-            clearVal &= ~TargetBufferFlags::DEPTH;
+        bool bothSamplerAndAttachment = false;
+        // We need to determine whether the same depth texture is both sampled and set as an attachment.
+        // If that's the case, we need to change the layout of the texture to DEPTH_SAMPLER, which is a
+        // more general layout. Otherwise, we prefer the DEPTH_ATTACHMENT layout, which is optimal for
+        // the non-sampling case.
+        for (uint8_t ind = 0; ind < Program::SAMPLER_BINDING_COUNT; ind++) {
+            VulkanSamplerGroup* vksb = mSamplerBindings[ind];
+            if (!vksb) {
+                continue;
+            }
+            vksb->transitionDepthSamplers(cmdbuffer);
+            if (vksb->hasDepthTexture(depth.texture)) {
+                // Setting the expected layout here and skip transition below because we already
+                // transitioned per sampler group.
+                //                renderPassDepthLayout = VulkanLayout::DEPTH_SAMPLER;
+                //                currentDepthLayout = renderPassDepthLayout;
+                bothSamplerAndAttachment = true;
+            }
         }
-        if (currentDepthLayout != renderPassDepthLayout) {
+
+        currentDepthLayout = depth.getLayout();        
+        if (currentDepthLayout != renderPassDepthLayout || bothSamplerAndAttachment) {
+            commands.acquire(depth.texture);
+            //            utils::slog.e <<"transitioning depth to " << renderPassDepthLayout
+            //                          << " from " << currentDepthLayout << utils::io::endl;
             depth.texture->transitionLayout(cmdbuffer,
                     depth.getSubresourceRange(VK_IMAGE_ASPECT_DEPTH_BIT), renderPassDepthLayout);
             currentDepthLayout = renderPassDepthLayout;
         }
+
+        // We cannot discard or clear the depth rt if it's been marked as readonly.
+        if (params.readOnlyDepthStencil & RenderPassParams::READONLY_DEPTH) {
+            discardEndVal &= ~TargetBufferFlags::DEPTH;
+            clearVal &= ~TargetBufferFlags::DEPTH;
+        }
     }
+
+    VulkanLayout const finalDepthLayout = renderPassDepthLayout;
 
     // Create the VkRenderPass or fetch it from cache.
     VulkanFboCache::RenderPassKey rpkey = {
@@ -1091,6 +1075,11 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassP
         .samples = rt->getSamples(),
         .subpassMask = uint8_t(params.subpassMask),
     };
+
+    //    utils::slog.e <<"initial: " << currentDepthLayout
+    //                  << " renderpass: " << renderPassDepthLayout
+    //                  << " final: " << finalDepthLayout
+    //                  <<utils::io::endl;
     for (int i = 0; i < MRT::MAX_SUPPORTED_RENDER_TARGET_COUNT; i++) {
         const VulkanAttachment& info = rt->getColor(i);
         if (info.texture) {
@@ -1177,8 +1166,9 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassP
         commands.acquire((VulkanTexture*) depth.texture);
     }
     for (int i = 0; i < MRT::MAX_SUPPORTED_RENDER_TARGET_COUNT; i++) {
-        if (rt->getColor(i).texture) {
-            commands.acquire(rt->getColor(i).texture);
+        auto texture = rt->getColor(i).texture;
+        if (texture) {
+            commands.acquire(texture);
         }
     }
 
@@ -1245,6 +1235,9 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassP
         .params = params,
         .currentSubpass = 0,
     };
+
+    //    utils::slog.e <<"end begin render pass" << utils::io::endl;
+
     FVK_SYSTRACE_END();
 }
 
@@ -1344,6 +1337,7 @@ void VulkanDriver::setRenderPrimitiveRange(Handle<HwRenderPrimitive> rph,
 void VulkanDriver::makeCurrent(Handle<HwSwapChain> drawSch, Handle<HwSwapChain> readSch) {
     FVK_SYSTRACE_CONTEXT();
     FVK_SYSTRACE_START("makeCurrent");
+    //    utils::slog.e <<"make current " << utils::io::endl;
 
     ASSERT_PRECONDITION_NON_FATAL(drawSch == readSch,
             "Vulkan driver does not support distinct draw/read swap chains.");
@@ -1361,21 +1355,29 @@ void VulkanDriver::makeCurrent(Handle<HwSwapChain> drawSch, Handle<HwSwapChain> 
         mDefaultRenderTarget->bindToSwapChain(*swapChain);
     }
 
+    //    utils::slog.e <<"make current end " << utils::io::endl;
+
     FVK_SYSTRACE_END();
 }
 
 void VulkanDriver::commit(Handle<HwSwapChain> sch) {
     FVK_SYSTRACE_CONTEXT();
     FVK_SYSTRACE_START("commit");
+    //    utils::slog.e <<"commit" << utils::io::endl;
 
     VulkanSwapChain* swapChain = mResourceAllocator.handle_cast<VulkanSwapChain*>(sch);
 
-    if (mCommands->flush()) {
-        collectGarbage();
-    }
+    FVK_SYSTRACE_START("cflush");        
+    //    mCommands->flush();
+    FVK_SYSTRACE_END();        
 
     // Present the backbuffer after the most recent command buffer submission has finished.
+    FVK_SYSTRACE_START("present");    
     swapChain->present();
+    FVK_SYSTRACE_END();    
+    collectGarbage();
+
+    //    utils::slog.e <<"commit end" << utils::io::endl;
     FVK_SYSTRACE_END();
 }
 
@@ -1508,6 +1510,8 @@ void VulkanDriver::draw(PipelineState pipelineState, Handle<HwRenderPrimitive> r
     FVK_SYSTRACE_CONTEXT();
     FVK_SYSTRACE_START("draw");
 
+    //    utils::slog.e <<"draw start" << utils::io::endl;
+
     VulkanCommandBuffer* commands = &mCommands->get();
     VkCommandBuffer cmdbuffer = commands->buffer();
     const VulkanRenderPrimitive& prim = *mResourceAllocator.handle_cast<VulkanRenderPrimitive*>(rph);
@@ -1524,7 +1528,7 @@ void VulkanDriver::draw(PipelineState pipelineState, Handle<HwRenderPrimitive> r
 
     // If this is a debug build, validate the current shader.
 #if FVK_ENABLED(FVK_DEBUG_SHADER_MODULE)
-    if (program->bundle.vertex == VK_NULL_HANDLE || program->bundle.fragment == VK_NULL_HANDLE) {
+    if (program->getVertexShader() == VK_NULL_HANDLE || program->getFragmentShader() == VK_NULL_HANDLE) {
         utils::slog.e << "Binding missing shader: " << program->name.c_str() << utils::io::endl;
     }
 #endif
@@ -1600,69 +1604,12 @@ void VulkanDriver::draw(PipelineState pipelineState, Handle<HwRenderPrimitive> r
     }
 
     // Push state changes to the VulkanPipelineCache instance. This is fast and does not make VK calls.
-    mPipelineCache.bindProgram(*program);
+    mPipelineCache.bindProgram(program);
     mPipelineCache.bindRasterState(mPipelineCache.getCurrentRasterState());
     mPipelineCache.bindPrimitiveTopology(prim.primitiveTopology);
     mPipelineCache.bindVertexArray(varray);
-
-    // Query the program for the mapping from (SamplerGroupBinding,Offset) to (SamplerBinding),
-    // where "SamplerBinding" is the integer in the GLSL, and SamplerGroupBinding is the abstract
-    // Filament concept used to form groups of samplers.
-
-    VkDescriptorImageInfo samplerInfo[VulkanPipelineCache::SAMPLER_BINDING_COUNT] = {};
-    VulkanTexture* samplerTextures[VulkanPipelineCache::SAMPLER_BINDING_COUNT] = {nullptr};
-
-    VulkanPipelineCache::UsageFlags usage;
-
-    UTILS_NOUNROLL
-    for (uint8_t samplerGroupIdx = 0; samplerGroupIdx < Program::SAMPLER_BINDING_COUNT; samplerGroupIdx++) {
-        const auto& samplerGroup = program->samplerGroupInfo[samplerGroupIdx];
-        const auto& samplers = samplerGroup.samplers;
-        if (samplers.empty()) {
-            continue;
-        }
-        VulkanSamplerGroup* vksb = mSamplerBindings[samplerGroupIdx];
-        if (!vksb) {
-            continue;
-        }
-        SamplerGroup* sb = vksb->sb.get();
-        assert_invariant(sb->getSize() == samplers.size());
-        size_t samplerIdx = 0;
-        for (auto& sampler : samplers) {
-            const SamplerDescriptor* boundSampler = sb->data() + samplerIdx;
-            samplerIdx++;
-
-            if (UTILS_LIKELY(boundSampler->t)) {
-                VulkanTexture* texture = mResourceAllocator.handle_cast<VulkanTexture*>(boundSampler->t);
-
-                // TODO: can this uninitialized check be checked in a higher layer?
-                // This fallback path is very flaky because the dummy texture might not have
-                // matching characteristics. (e.g. if the missing texture is a 3D texture)
-                if (UTILS_UNLIKELY(texture->getPrimaryImageLayout() == VulkanLayout::UNDEFINED)) {
-#if FVK_ENABLED(FVK_DEBUG_TEXTURE)
-                    utils::slog.w << "Uninitialized texture bound to '" << sampler.name.c_str() << "'";
-                    utils::slog.w << " in material '" << program->name.c_str() << "'";
-                    utils::slog.w << " at binding point " << +sampler.binding << utils::io::endl;
-#endif
-                    texture = mEmptyTexture.get();
-                }
-
-                const SamplerParams& samplerParams = boundSampler->s;
-                VkSampler vksampler = mSamplerCache.getSampler(samplerParams);
-
-                usage = VulkanPipelineCache::getUsageFlags(sampler.binding, samplerGroup.stageFlags, usage);
-
-                samplerInfo[sampler.binding] = {
-                    .sampler = vksampler,
-                    .imageView = texture->getPrimaryImageView(),
-                    .imageLayout = ImgUtil::getVkLayout(texture->getPrimaryImageLayout())
-                };
-                samplerTextures[sampler.binding] = texture;
-            }
-        }
-    }
-
-    mPipelineCache.bindSamplers(samplerInfo, samplerTextures, usage);
+    mPipelineCache.bindSamplers(commands, mSamplerBindings, program);
+    //    commands.acquire(
 
     // Bind new descriptor sets if they need to change.
     // If descriptor set allocation failed, skip the draw call and bail. No need to emit an error
@@ -1713,6 +1660,10 @@ void VulkanDriver::draw(PipelineState pipelineState, Handle<HwRenderPrimitive> r
     const uint32_t firstInstId = 0;
 
     vkCmdDrawIndexed(cmdbuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstId);
+
+
+    //    utils::slog.e <<"draw end" << utils::io::endl;
+
     FVK_SYSTRACE_END();
 }
 

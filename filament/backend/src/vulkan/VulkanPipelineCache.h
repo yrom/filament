@@ -45,6 +45,7 @@ namespace filament::backend {
 struct VulkanProgram;
 struct VulkanBufferObject;
 struct VulkanTexture;
+struct VulkanSamplerGroup;
 class VulkanResourceAllocator;
 
 // VulkanPipelineCache manages a cache of descriptor sets and pipelines.
@@ -138,7 +139,10 @@ public:
     // calls. On destruction it will free any cached Vulkan objects that haven't already been freed.
     VulkanPipelineCache(VulkanResourceAllocator* allocator);
     ~VulkanPipelineCache();
-    void setDevice(VkDevice device, VmaAllocator allocator);
+
+    // The dummy texture/sampler is used to clear out old descriptor set or as placeholder.
+    void initialize(VkDevice device, VmaAllocator allocator, VkImageView dummyImageView,
+            VkSampler dummySampler);
 
     // Creates new descriptor sets if necessary and binds them using vkCmdBindDescriptorSets.
     // Returns false if descriptor set allocation fails.
@@ -152,7 +156,7 @@ public:
     void bindScissor(VkCommandBuffer cmdbuffer, VkRect2D scissor) noexcept;
 
     // Each of the following methods are fast and do not make Vulkan calls.
-    void bindProgram(const VulkanProgram& program) noexcept;
+    void bindProgram(VulkanProgram* program) noexcept;
     void bindRasterState(const RasterState& rasterState) noexcept;
     void bindRenderPass(VkRenderPass renderPass, int subpassIndex) noexcept;
     void bindPrimitiveTopology(VkPrimitiveTopology topology) noexcept;
@@ -160,8 +164,7 @@ public:
             VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE) noexcept;
     void bindUniformBuffer(uint32_t bindingIndex, VkBuffer buffer,
             VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE) noexcept;
-    void bindSamplers(VkDescriptorImageInfo samplers[SAMPLER_BINDING_COUNT],
-            VulkanTexture* textures[SAMPLER_BINDING_COUNT], UsageFlags flags) noexcept;
+    void bindSamplers(VulkanCommandBuffer* commands, VulkanSamplerGroup* const* samplerGroup, VulkanProgram* program);
     void bindInputAttachment(uint32_t bindingIndex, VkDescriptorImageInfo imageInfo) noexcept;
     void bindVertexArray(const VertexArray& varray) noexcept;
 
@@ -187,11 +190,6 @@ public:
     // buffer; they are not global to the device. Therefore we need to be notified when a
     // new command buffer becomes active.
     void onCommandBuffer(const VulkanCommandBuffer& cmdbuffer) override;
-
-    // Injects a dummy texture that can be used to clear out old descriptor sets.
-    void setDummyTexture(VkImageView imageView) {
-        mDummyTargetInfo.imageView = imageView;
-    }
 
     // Acquires a resource to be bound to the current pipeline. The ownership of the resource
     // will be transferred to the corresponding pipeline when pipeline is bound.
@@ -319,14 +317,17 @@ private:
         DescriptorImageInfo samplers[SAMPLER_BINDING_COUNT];          // 1488    80
         DescriptorImageInfo inputAttachments[INPUT_ATTACHMENT_COUNT]; //   24  1568
         uint32_t uniformBufferOffsets[UBUFFER_BINDING_COUNT];         //   40  1592
-        uint32_t uniformBufferSizes[UBUFFER_BINDING_COUNT];           //   40  1632
+        uint32_t uniformBufferSizes[UBUFFER_BINDING_COUNT];          //   40   1632
+        utils::bitset128 layout;                                     //   16   1672
     };
+    /*
     static_assert(offsetof(DescriptorKey, samplers)              == 80);
     static_assert(offsetof(DescriptorKey, inputAttachments)      == 1568);
     static_assert(offsetof(DescriptorKey, uniformBufferOffsets)  == 1592);
     static_assert(offsetof(DescriptorKey, uniformBufferSizes)    == 1632);
-    static_assert(sizeof(DescriptorKey) == 1672, "DescriptorKey must not have implicit padding.");
-
+    static_assert(offsetof(DescriptorKey, layout)                == 1672);
+    static_assert(sizeof(DescriptorKey) == 1688, "DescriptorKey must not have implicit padding.");
+    */
     using DescHashFn = utils::hash::MurmurHashFn<DescriptorKey>;
 
     struct DescEqual {
@@ -386,15 +387,23 @@ private:
 
     using PipelineLayoutMap = tsl::robin_map<PipelineLayoutKey , PipelineLayoutCacheEntry,
             PipelineLayoutKeyHashFn, PipelineLayoutKeyEqual>;
+    using PipelineLayoutResourceMap
+            = std::unordered_map<VkPipelineLayout, std::unique_ptr<VulkanAcquireOnlyResourceManager>>;
     using PipelineMap = tsl::robin_map<PipelineKey, PipelineCacheEntry,
             PipelineHashFn, PipelineEqual>;
+    using PipelineResourceMap
+            = std::unordered_map<VkPipeline, std::unique_ptr<VulkanAcquireOnlyResourceManager>>;
     using DescriptorMap
             = tsl::robin_map<DescriptorKey, DescriptorCacheEntry, DescHashFn, DescEqual>;
     using DescriptorResourceMap
             = std::unordered_map<uint32_t, std::unique_ptr<VulkanAcquireOnlyResourceManager>>;
 
     PipelineLayoutMap mPipelineLayouts;
+    PipelineLayoutResourceMap mPipelineLayoutResources;
+
     PipelineMap mPipelines;
+    PipelineResourceMap mPipelineResources;
+
     DescriptorMap mDescriptorSets;
     DescriptorResourceMap mDescriptorResources;
 
@@ -416,7 +425,7 @@ private:
     RasterState mCurrentRasterState;
     PipelineKey mPipelineRequirements = {};
     DescriptorKey mDescriptorRequirements = {};
-    VkSpecializationInfo* mSpecializationRequirements = {};
+    VkSpecializationInfo mSpecializationRequirements = {};
 
     // Current bindings for the pipeline and descriptor sets.
     PipelineKey mBoundPipeline = {};
@@ -457,6 +466,7 @@ private:
 
     VulkanResourceAllocator* mResourceAllocator;
     VulkanAcquireOnlyResourceManager mPipelineBoundResources;
+    VulkanAcquireOnlyResourceManager mDescriptorSetBoundResources;    
 };
 
 } // namespace filament::backend

@@ -17,7 +17,11 @@
 #include "VulkanHandles.h"
 
 #include "VulkanConstants.h"
+#include "VulkanImageUtility.h"
 #include "VulkanMemory.h"
+#include "VulkanTexture.h"
+#include "VulkanResourceAllocator.h"
+#include "VulkanSamplerCache.h"
 
 #include <backend/platforms/VulkanPlatform.h>
 
@@ -26,6 +30,8 @@
 using namespace bluevk;
 
 namespace filament::backend {
+
+using ImgUtil = VulkanImageUtility;
 
 static void flipVertically(VkRect2D* rect, uint32_t framebufferHeight) {
     rect->offset.y = framebufferHeight - rect->offset.y - rect->extent.height;
@@ -49,88 +55,99 @@ static void clampToFramebuffer(VkRect2D* rect, uint32_t fbWidth, uint32_t fbHeig
 VulkanProgram::VulkanProgram(VkDevice device, const Program& builder) noexcept
     : HwProgram(builder.getName()),
       VulkanResource(VulkanResourceType::PROGRAM),
+      mInfo(new PipelineInfo(builder.getSpecializationConstants().size())),
       mDevice(device) {
-    auto const& blobs = builder.getShadersSource();
-    VkShaderModule* modules[2] = {&bundle.vertex, &bundle.fragment};
-    // TODO: handle compute shaders.
-    for (size_t i = 0; i < 2; i++) {
+    auto& blobs = builder.getShadersSource();
+    auto& modules = mInfo->shaders;
+    for (size_t i = 0; i < MAX_SHADER_MODULES; i++) {
         const auto& blob = blobs[i];
-        VkShaderModule* module = modules[i];
-        VkShaderModuleCreateInfo moduleInfo = {};
-        moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        moduleInfo.codeSize = blob.size();
-        moduleInfo.pCode = (uint32_t*) blob.data();
-        VkResult result = vkCreateShaderModule(mDevice, &moduleInfo, VKALLOC, module);
+        uint32_t* data = (uint32_t*)blob.data();
+        VkShaderModule& module = modules[i];
+        VkShaderModuleCreateInfo moduleInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = blob.size(),
+            .pCode = data,
+        };
+        VkResult result = vkCreateShaderModule(mDevice, &moduleInfo, VKALLOC, &module);
         ASSERT_POSTCONDITION(result == VK_SUCCESS, "Unable to create shader module.");
     }
 
     // populate the specialization constants requirements right now
     auto const& specializationConstants = builder.getSpecializationConstants();
-    if (!specializationConstants.empty()) {
-        // Allocate a single heap block to store all the specialization constants structures
-        // our supported types are int32, float and bool, so we use 4 bytes per data. bool will
-        // just use the first byte.
-        char* pStorage = (char*)malloc(
-                sizeof(VkSpecializationInfo) +
-                specializationConstants.size() * sizeof(VkSpecializationMapEntry) +
-                specializationConstants.size() * 4);
-
-        VkSpecializationInfo* const pInfo = (VkSpecializationInfo*)pStorage;
-        VkSpecializationMapEntry* const pEntries =
-                (VkSpecializationMapEntry*)(pStorage + sizeof(VkSpecializationInfo));
-        void* pData = pStorage + sizeof(VkSpecializationInfo) +
-                      specializationConstants.size() * sizeof(VkSpecializationMapEntry);
-
-        *pInfo = {
-                .mapEntryCount = specializationConstants.size(),
-                .pMapEntries = pEntries,
-                .dataSize = specializationConstants.size() * 4,
-                .pData = pData,
+    uint32_t const specConstCount = static_cast<uint32_t>(specializationConstants.size());
+    char* specData = mInfo->specConstData.get();
+    if (specConstCount > 0) {
+        mInfo->specializationInfo = {
+            .mapEntryCount = specConstCount,
+            .pMapEntries = mInfo->specConsts.data(),
+            .dataSize = specConstCount * 4,
+            .pData = specData,
         };
-
-        for (size_t i = 0; i < specializationConstants.size(); i++) {
-            uint32_t const offset = uint32_t(i) * 4;
-            pEntries[i] = {
-                .constantID = specializationConstants[i].id,
-                .offset = offset,
-                // Note that bools are 4-bytes in Vulkan
-                // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkBool32.html
-                .size = 4,
-            };
-
-            using SpecConstant = Program::SpecializationConstant::Type;
-            char const* addr = (char*)pData + offset;
-            SpecConstant const& arg = specializationConstants[i].value;
-            if (std::holds_alternative<bool>(arg)) {
-                *((VkBool32*)addr) = std::get<bool>(arg) ? VK_TRUE : VK_FALSE;
-            } else if (std::holds_alternative<float>(arg)) {
-                *((float*)addr) = std::get<float>(arg);
-            } else {
-                *((int32_t*)addr) = std::get<int32_t>(arg);
-            }
+    }
+    for (size_t i = 0; i < specConstCount; ++i) {
+        uint32_t const offset = uint32_t(i) * 4;
+        mInfo->specConsts[i] = {
+            .constantID = specializationConstants[i].id,
+            .offset = offset,
+            // Note that bools are 4-bytes in Vulkan
+            // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkBool32.html
+            .size = 4,
+        };
+        using SpecConstant = Program::SpecializationConstant::Type;
+        char const* addr = (char*)specData + offset;
+        SpecConstant const& arg = specializationConstants[i].value;
+        if (std::holds_alternative<bool>(arg)) {
+            *((VkBool32*)addr) = std::get<bool>(arg) ? VK_TRUE : VK_FALSE;
+        } else if (std::holds_alternative<float>(arg)) {
+            *((float*)addr) = std::get<float>(arg);
+        } else {
+            *((int32_t*)addr) = std::get<int32_t>(arg);
         }
-        bundle.specializationInfos = pInfo;
     }
 
-    // Make a copy of the binding map
-    samplerGroupInfo = builder.getSamplerGroupInfo();
+    auto& samplerGroupInfo = builder.getSamplerGroupInfo();
+    auto& bindingToSamplerIndex = mInfo->bindingToSamplerIndex;
+    auto& usage = mInfo->usage;
+    for (uint8_t samplerGroupIdx = 0; samplerGroupIdx < Program::SAMPLER_BINDING_COUNT; samplerGroupIdx++) {
+        auto const& samplerGroup = samplerGroupInfo[samplerGroupIdx];
+        auto const& samplers = samplerGroup.samplers;
+        for (size_t i = 0; i < samplers.size(); ++i) {
+            uint32_t const binding = samplers[i].binding;
+            bindingToSamplerIndex[binding] = (samplerGroupIdx << 8) | (0xff & i);
+            usage = VulkanPipelineCache::getUsageFlags(binding, samplerGroup.stageFlags, usage);
+        }
+    }
+
     #if FVK_ENABLED(FVK_DEBUG_SHADER_MODULE)
         utils::slog.d << "Created VulkanProgram " << builder << ", shaders = (" << bundle.vertex
                       << ", " << bundle.fragment << ")" << utils::io::endl;
     #endif
 }
 
-VulkanProgram::VulkanProgram(VkDevice device, VkShaderModule vs, VkShaderModule fs) noexcept
+VulkanProgram::VulkanProgram(VkDevice device, VkShaderModule vs, VkShaderModule fs,
+        utils::FixedCapacityVector<std::tuple<uint8_t, uint8_t, ShaderStageFlags>> const&
+                samplerBindings) noexcept
     : VulkanResource(VulkanResourceType::PROGRAM),
+      mInfo(new PipelineInfo(0)),
       mDevice(device) {
-    bundle.vertex = vs;
-    bundle.fragment = fs;
+    mInfo->shaders[0] = vs;
+    mInfo->shaders[1] = fs;
+    auto& bindingToSamplerIndex = mInfo->bindingToSamplerIndex;
+    auto& usage = mInfo->usage;
+
+    bindingToSamplerIndex.resize(samplerBindings.size());
+    for (size_t binding = 0; binding < samplerBindings.size(); ++binding) {
+        auto const [groupInd, samplerInd, stageFlags] = samplerBindings[binding];
+        bindingToSamplerIndex[binding] = (static_cast<uint16_t>(groupInd) << 8) | (0xff & samplerInd);
+        usage = VulkanPipelineCache::getUsageFlags(binding, stageFlags, usage);
+    }
 }
 
 VulkanProgram::~VulkanProgram() {
-    vkDestroyShaderModule(mDevice, bundle.vertex, VKALLOC);
-    vkDestroyShaderModule(mDevice, bundle.fragment, VKALLOC);
-    free(bundle.specializationInfos);
+    for (auto shader: mInfo->shaders) {
+        vkDestroyShaderModule(mDevice, shader, VKALLOC);
+    }
+    delete mInfo;
 }
 
 // Creates a special "default" render target (i.e. associated with the swap chain)
@@ -290,6 +307,120 @@ VulkanBufferObject::VulkanBufferObject(VmaAllocator allocator, VulkanStagePool& 
       VulkanResource(VulkanResourceType::BUFFER_OBJECT),
       buffer(allocator, stagePool, getBufferObjectUsage(bindingType), byteCount),
       bindingType(bindingType) {}
+
+VulkanSamplerGroup::VulkanSamplerGroup(VulkanResourceAllocator* allocator,
+        VulkanSamplerCache* samplerCache, size_t count)
+    : VulkanResource(VulkanResourceType::SAMPLER_GROUP),
+      mSamplerCache(samplerCache),
+      mResourceAllocator(allocator),
+      mInfo(nullptr),
+      mResources(allocator) {}
+
+void VulkanSamplerGroup::update(SamplerDescriptor const* samplers, size_t count) {
+    //    utils::slog.e <<"calling update on sampler-group=" << this
+    //                  << " count=" << count << " resources=" << mResources.size() << utils::io::endl;
+    mResources.clear();
+    if (mInfo) {
+        delete mInfo;
+    }
+    mInfo = new PipelineInfo(count);    
+
+    auto& imageInfo = mInfo->imageInfo;
+    auto& textures = mInfo->textures;
+    auto& depthTextures = mInfo->depthTextures;
+
+    //    utils::slog.e <<"sampler group: " << this << utils::io::endl;
+    for (size_t i = 0; i < count; ++i) {
+        SamplerDescriptor const& sampler = *(samplers + i);
+        auto textureHandle = sampler.t;
+        if (!textureHandle) {
+            continue;
+        }
+        VulkanTexture* texture = mResourceAllocator->handle_cast<VulkanTexture*>(textureHandle);
+        //        utils::slog.e <<"texture=" << texture << utils::io::endl;
+        textures[i] = texture;
+        mResources.acquire(texture);
+        //        utils::slog.e <<"sampler-group=" << this << " acquired texture=" << texture
+        //                      << utils::io::endl;
+
+        if (any(texture->usage & TextureUsage::DEPTH_ATTACHMENT)) {
+            depthTextures.insert(texture);
+        }
+
+        // We need to listen for updates like image actually being created and layout changes.
+        texture->addListener(this, [this, i](VulkanTexture const* updatedTexture) {
+            this->update(i);
+        });
+
+        SamplerParams const& samplerParams = sampler.s;
+        VkSampler vksampler = mSamplerCache->getSampler(samplerParams);
+        imageInfo[i].sampler = vksampler;
+
+        //        utils::slog.e <<" sampler=" << vksampler;
+
+        auto const imageLayout = texture->getPrimaryImageLayout();
+        if (imageLayout == VulkanLayout::UNDEFINED) {
+            // We need to add ourselves as a listener to the texture, so that we'd update the
+            // pipeline info when the texture is ready.
+            continue;
+        }
+        imageInfo[i].imageView = texture->getPrimaryImageView();
+        imageInfo[i].imageLayout = ImgUtil::getVkLayout(imageLayout);
+
+        //        utils::slog.e <<" imageview=" << imageInfo[i].imageView;
+        //        utils::slog.e <<" layout=" << imageInfo[i].imageLayout << utils::io::endl;
+    }
+    //    utils::slog.e <<"sampler group done " << this << utils::io::endl;    
+}
+
+VulkanSamplerGroup::VulkanSamplerGroup(
+        utils::FixedCapacityVector<std::pair<VulkanTexture*, VkSampler>> const& samplers)
+    : VulkanResource(VulkanResourceType::SAMPLER_GROUP),
+      mInfo(new PipelineInfo(samplers.size())),
+      mResources(nullptr) {
+    auto& imageInfo = mInfo->imageInfo;
+    auto& textures = mInfo->textures;
+    for (size_t i = 0; i < samplers.size(); ++i) {
+        auto& sampler = samplers[i];
+        auto texture = sampler.first;
+        auto vksampler = sampler.second;
+
+        assert_invariant(texture && "sampler for VulkanSamplerGroup must not be null");
+
+        textures[i] = texture;
+        auto const imageLayout = texture->getPrimaryImageLayout();
+        imageInfo[i] = {
+            .sampler = vksampler,
+            .imageView = texture->getPrimaryImageView(),
+            .imageLayout = ImgUtil::getVkLayout(imageLayout),
+        };
+
+        texture->addListener(this, [this, i](VulkanTexture const* updatedTexture) {
+            this->update(i);
+        });
+    }
+}
+
+void VulkanSamplerGroup::update(size_t ind) {
+    auto& textures = mInfo->textures;
+    auto& imageInfo = mInfo->imageInfo;
+    auto const texture = textures[ind];
+    if (!texture) {
+        return;
+    }
+    auto const imageLayout = texture->getPrimaryImageLayout();
+    if (imageLayout == VulkanLayout::UNDEFINED) {
+        return;
+    }
+    //    utils::slog.e <<"updated texture=" << texture <<" vktexture=" << texture->getVkImage();
+    //    utils::slog.e <<" sampler=" << imageInfo[ind].sampler;
+    imageInfo[ind].imageView = texture->getPrimaryImageView();
+    imageInfo[ind].imageLayout = ImgUtil::getVkLayout(imageLayout);
+
+//    utils::slog.e <<" imageview=" << imageInfo[ind].imageView;
+//    utils::slog.e <<" layout=" << imageInfo[ind].imageLayout << utils::io::endl;
+//    utils::slog.e <<"update end" << utils::io::endl;
+}
 
 void VulkanRenderPrimitive::setPrimitiveType(PrimitiveType pt) {
     this->type = pt;

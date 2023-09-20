@@ -25,6 +25,8 @@
 
 #include <utils/RangeMap.h>
 
+#include <unordered_map>
+
 namespace filament::backend {
 
 struct VulkanTexture : public HwTexture, VulkanResource {
@@ -53,7 +55,9 @@ struct VulkanTexture : public HwTexture, VulkanResource {
     // Sets the min/max range of miplevels in the primary image view.
     void setPrimaryRange(uint32_t minMiplevel, uint32_t maxMiplevel);
 
-    VkImageSubresourceRange getPrimaryRange() const { return mPrimaryViewRange; }
+    VkImageSubresourceRange getPrimaryViewRange() const { return mPrimaryViewRange; }
+
+    VkImageSubresourceRange getFullViewRange() const { return mFullViewRange; }
 
     VulkanLayout getPrimaryImageLayout() const {
         return getLayout(mPrimaryViewRange.baseArrayLayer, mPrimaryViewRange.baseMipLevel);
@@ -78,7 +82,7 @@ struct VulkanTexture : public HwTexture, VulkanResource {
     }
 
     void transitionLayout(VkCommandBuffer commands, const VkImageSubresourceRange& range,
-            VulkanLayout newLayout);
+                          VulkanLayout newLayout, bool signal=true);
 
     // Returns the preferred data plane of interest for all image views.
     // For now this always returns either DEPTH or COLOR.
@@ -88,6 +92,14 @@ struct VulkanTexture : public HwTexture, VulkanResource {
     void print() const;
 #endif
 
+    using ListenerId = void*;
+    using ListenerFunc = std::function<void(VulkanTexture const*)>;
+
+    inline void addListener(ListenerId listener, ListenerFunc&& func) {
+        mListeners[listener] = std::move(func);
+        //        utils::slog.e << utils::io::endl << "texture this=" << this << " added=" << listener << utils::io::endl;
+    }
+
 private:
     // Gets or creates a cached VkImageView for a range of miplevels, array layers, viewType, and
     // swizzle (or not).
@@ -96,6 +108,17 @@ private:
 
     void updateImageWithBlit(const PixelBufferDescriptor& hostData, uint32_t width, uint32_t height,
             uint32_t depth, uint32_t miplevel);
+
+    inline void signalListeners() const {
+        // We have to make a copy here since the callback might change mListeners.
+        std::vector<ListenerFunc> funcs;
+        for(auto& listener: mListeners) {
+            funcs.push_back(std::move(listener.second));
+        }
+        for (auto func: funcs) {
+            func(this);
+        }
+    }
 
     // The texture with the sidecar owns the sidecar.
     std::unique_ptr<VulkanTexture> mSidecarMSAA;
@@ -108,6 +131,8 @@ private:
     // Track the image layout of each subresource using a sparse range map.
     utils::RangeMap<uint32_t, VulkanLayout> mSubresourceLayouts;
 
+    VkImageSubresourceRange mFullViewRange;
+    
     // Track the range of subresources that define the "primary" image view, which is the special
     // image view that gets bound to an actual texture sampler.
     VkImageSubresourceRange mPrimaryViewRange;
@@ -117,6 +142,9 @@ private:
     VkDevice mDevice;
     VmaAllocator mAllocator;
     VulkanCommands* mCommands;
+
+    // Listeners are called when an update occurs.
+    std::unordered_map<ListenerId, ListenerFunc> mListeners;
 };
 
 } // namespace filament::backend
