@@ -18,7 +18,7 @@
 #include "VulkanContext.h"
 #include "VulkanFboCache.h"
 #include "VulkanHandles.h"
-#include "VulkanSamplerCache.h"
+#include "cache/VulkanSamplerCache.h"
 #include "VulkanTexture.h"
 
 #include <utils/FixedCapacityVector.h>

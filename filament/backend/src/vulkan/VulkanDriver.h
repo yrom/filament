@@ -25,9 +25,9 @@
 #include "VulkanPipelineCache.h"
 #include "VulkanReadPixels.h"
 #include "VulkanResourceAllocator.h"
-#include "VulkanSamplerCache.h"
 #include "VulkanStagePool.h"
 #include "VulkanUtility.h"
+#include "cache/VulkanSamplerCache.h"
 
 #include "DriverBase.h"
 #include "private/backend/Driver.h"
