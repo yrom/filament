@@ -508,7 +508,7 @@ endif()
 if (IS_MOBILE_TARGET)
     set(MATC_TARGET mobile)
 else()
-    set(MATC_TARGET desktop)
+    set(MATC_TARGET all)
 endif()
 
 set(MATC_API_FLAGS )

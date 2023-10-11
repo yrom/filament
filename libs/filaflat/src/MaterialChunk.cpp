@@ -138,6 +138,8 @@ bool MaterialChunk::getTextShader(Unflattener unflattener,
         if (!unflattener.read(&lineIndex)) {
             return false;
         }
+        // TODO (exv): CRASH HERE
+        utils::slog.i << "DIC: " << dictionary.size() << ", lineIndex: " << lineIndex << utils::io::endl;
         const auto& content = dictionary[lineIndex];
 
         // Replace null with newline.
@@ -228,4 +230,3 @@ void MaterialChunk::visitShaders(
 }
 
 } // namespace filaflat
-

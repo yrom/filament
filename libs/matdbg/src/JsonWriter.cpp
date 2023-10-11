@@ -136,13 +136,23 @@ static void printShaderInfo(ostream& json, const vector<ShaderInfo>& info, const
     }
 }
 
-static bool printGlslInfo(ostream& json, const ChunkContainer& container) {
+static bool printGlslInfo(ostream& json, const ChunkContainer& container, ChunkType chunkType) {
     std::vector<ShaderInfo> info;
-    info.resize(getShaderCount(container, ChunkType::MaterialGlsl));
-    if (!getShaderInfo(container, info.data(), ChunkType::MaterialGlsl)) {
+    info.resize(getShaderCount(container, chunkType));
+    if (!getGlShaderInfo(container, info.data(), chunkType)) {
         return false;
     }
-    json << "\"opengl\": [\n";
+    switch (chunkType) {
+        case ChunkType::MaterialGlsl:
+            json << "\"opengl\": [\n";
+            break;
+        case ChunkType::MaterialEssl1:
+            json << "\"essl1\": [\n";
+            break;
+        default:
+            assert(false && "Unreachable");
+            break;
+    }
     printShaderInfo(json, info, container);
     json << "],\n";
     return true;
@@ -180,7 +190,10 @@ bool JsonWriter::writeMaterialInfo(const filaflat::ChunkContainer& container) {
     if (!printParametersInfo(json, container)) {
         return false;
     }
-    if (!printGlslInfo(json, container)) {
+    if (!printGlslInfo(json, container, ChunkType::MaterialGlsl)) {
+        return false;
+    }
+    if (!printGlslInfo(json, container, ChunkType::MaterialEssl1)) {
         return false;
     }
     if (!printVkInfo(json, container)) {
@@ -226,6 +239,7 @@ bool JsonWriter::writeActiveInfo(const filaflat::ChunkContainer& package,
     json << "[\"";
     switch (backend) {
         case Backend::OPENGL:
+            // TODO(exv): insert essl1 here?
             shaders.resize(getShaderCount(package, ChunkType::MaterialGlsl));
             getShaderInfo(package, shaders.data(), ChunkType::MaterialGlsl);
             json << "opengl";

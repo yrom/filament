@@ -29,7 +29,8 @@ namespace matdbg {
 // in a manner similar to ShaderExtractor.
 class ShaderReplacer {
 public:
-    ShaderReplacer(backend::Backend backend, const void* data, size_t size);
+    ShaderReplacer(backend::Backend backend, backend::ShaderLanguage language,
+            const void* data, size_t size);
     ~ShaderReplacer();
     bool replaceShaderSource(backend::ShaderModel shaderModel, Variant variant,
             backend::ShaderStage stage, const char* sourceString, size_t stringLength);

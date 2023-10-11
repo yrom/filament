@@ -127,7 +127,7 @@ private:
 //    GET /api/matids
 //    GET /api/materials
 //    GET /api/material?matid={id}
-//    GET /api/shader?matid={id}&type=[glsl|spirv]&[glindex|vkindex|metalindex]={index}
+//    GET /api/shader?matid={id}&type=[glsl|essl1|spirv]&[glindex|vkindex|metalindex]={index}
 //    GET /api/active
 //
 class RestRequestHandler : public CivetHandler {
@@ -249,6 +249,7 @@ public:
         }
 
         const std::string_view glsl("glsl");
+        const std::string_view essl1("essl1");
         const std::string_view msl("msl");
         const std::string_view spirv("spirv");
 
@@ -275,12 +276,16 @@ public:
         }
 
         if (glindex[0]) {
-            if (language != glsl) {
-                return softError("Only GLSL is supported.");
+            if (language != glsl && language != essl1) {
+                return softError("Only GLSL and ESSL1 are supported.");
             }
 
-            FixedCapacityVector<ShaderInfo> info(getShaderCount(package, ChunkType::MaterialGlsl));
-            if (!getShaderInfo(package, info.data(), ChunkType::MaterialGlsl)) {
+            ChunkType chunkType = language == glsl
+                                  ? ChunkType::MaterialGlsl
+                                  : ChunkType::MaterialEssl1;
+
+            FixedCapacityVector<ShaderInfo> info(getShaderCount(package, chunkType));
+            if (!getGlShaderInfo(package, info.data(), chunkType)) {
                 return error(__LINE__);
             }
 
@@ -289,7 +294,9 @@ public:
                 return error(__LINE__);
             }
 
-            ShaderExtractor extractor(ShaderLanguage::ESSL3, result->package, result->packageSize);
+            ShaderExtractor extractor(
+                language == glsl ? ShaderLanguage::ESSL3 : ShaderLanguage::ESSL1,
+                result->package, result->packageSize);
             if (!extractor.parse()) {
                 return error(__LINE__);
             }
@@ -333,7 +340,7 @@ public:
                 return true;
             }
 
-            return softError("Only SPIRV is supported.");
+            return softError("Only SPIRV and GLSL are supported.");
         }
 
         if (metalindex[0]) {
@@ -429,7 +436,7 @@ public:
         //
         // Commands:
         //
-        //     EDIT [material id] [api index] [shader index] [shader length] [shader source....]
+        //     EDIT [material id] [api index] [language index] [shader index] [shader length] [shader source....]
         //
 
         const static std::string_view kEditCmd = "EDIT ";
@@ -440,9 +447,10 @@ public:
             std::istringstream str(command);
             uint32_t matid;
             int api;
+            int language;
             int shaderIndex;
             int shaderLength;
-            str >> std::hex >> matid >> std::dec >> api >> shaderIndex >> shaderLength;
+            str >> std::hex >> matid >> std::dec >> api >> language >> shaderIndex >> shaderLength;
             const char* source = data + kEditCmdLength + str.tellg() + 1;
             const size_t remaining = size - kEditCmdLength - str.tellg();
 
@@ -453,7 +461,10 @@ public:
                 return true;
             }
 
-            mServer->handleEditCommand(matid, backend::Backend(api), shaderIndex, source,
+            mServer->handleEditCommand(matid,
+                    backend::Backend(api),
+                    backend::ShaderLanguage(language),
+                    shaderIndex, source,
                     shaderLength);
             return true;
         }
@@ -577,7 +588,8 @@ void DebugServer::updateActiveVariants() {
     }
 }
 
-bool DebugServer::handleEditCommand(const MaterialKey& key, backend::Backend api, int shaderIndex,
+bool DebugServer::handleEditCommand(const MaterialKey& key, backend::Backend api,
+            backend::ShaderLanguage language, int shaderIndex,
             const char* source, size_t size) {
     const auto error = [](int line) {
         slog.e << "DebugServer: Unable to apply shader edit at line " << line << io::endl;
@@ -597,10 +609,21 @@ bool DebugServer::handleEditCommand(const MaterialKey& key, backend::Backend api
     size_t shaderCount;
     switch (api) {
         case backend::Backend::OPENGL: {
-            shaderCount = getShaderCount(package, ChunkType::MaterialGlsl);
+            ChunkType chunkType;
+            switch (language) {
+                case ShaderLanguage::ESSL1:
+                    chunkType = ChunkType::MaterialGlsl;
+                    break;
+                case ShaderLanguage::ESSL3:
+                    chunkType = ChunkType::MaterialEssl1;
+                    break;
+                default:
+                    return error(__LINE__);
+            }
+            shaderCount = getShaderCount(package, chunkType);
             infos.reserve(shaderCount);
             infos.resize(shaderCount);
-            if (!getShaderInfo(package, infos.data(), ChunkType::MaterialGlsl)) {
+            if (!getGlShaderInfo(package, infos.data(), chunkType)) {
                 return error(__LINE__);
             }
             break;
@@ -632,7 +655,7 @@ bool DebugServer::handleEditCommand(const MaterialKey& key, backend::Backend api
     }
 
     const ShaderInfo info = infos[shaderIndex];
-    ShaderReplacer editor(api, package.getData(), package.getSize());
+    ShaderReplacer editor(api, language, package.getData(), package.getSize());
     if (!editor.replaceShaderSource(info.shaderModel, info.variant, info.pipelineStage, source, size)) {
         return error(__LINE__);
     }

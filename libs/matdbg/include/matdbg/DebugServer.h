@@ -91,7 +91,8 @@ private:
      *  Replaces the entire content of a particular shader variant. The given shader index uses the
      *  same ordering that the variants have within the package.
      */
-    bool handleEditCommand(const MaterialKey& mat, backend::Backend api, int shaderIndex,
+    bool handleEditCommand(const MaterialKey& mat, backend::Backend api,
+            backend::ShaderLanguage language,int shaderIndex,
             const char* newShaderContent, size_t newShaderLength);
 
     const backend::Backend mBackend;

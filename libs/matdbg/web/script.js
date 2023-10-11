@@ -59,7 +59,7 @@ function getShaderAPI(selection) {
 }
 
 function rebuildMaterial() {
-    let api = 0, index = -1;
+    let api = 0, language = -1, index = -1;
 
     const shader = getShaderRecord(gCurrentShader);
     const shaderApi = getShaderAPI();
@@ -68,6 +68,13 @@ function rebuildMaterial() {
         case "opengl": api = 1; index = gCurrentShader.glindex; break;
         case "vulkan": api = 2; index = gCurrentShader.vkindex; break;
         case "metal":  api = 3; index = gCurrentShader.metalindex; break;
+    }
+
+    switch (gCurrentLanguage) {
+        case "essl1": language = 0; break;
+        case "glsl": language = 1; break;
+        case "spirv": language = 2; break;
+        case "msl": language = 3; break;
     }
 
     if (shaderApi === "vulkan") {
@@ -80,7 +87,7 @@ function rebuildMaterial() {
 
     const editedText = shader[gCurrentLanguage];
     const byteCount = new Blob([editedText]).size;
-    gSocket.send(`EDIT ${gCurrentShader.matid} ${api} ${index} ${byteCount} ${editedText}`);
+    gSocket.send(`EDIT ${gCurrentShader.matid} ${api} ${language} ${index} ${byteCount} ${editedText}`);
 }
 
 document.querySelector("body").addEventListener("click", (evt) => {
@@ -108,7 +115,7 @@ document.querySelector("body").addEventListener("click", (evt) => {
     }
 
     // Handle language selection.
-    for (const lang of "glsl spirv msl".split(" ")) {
+    for (const lang of ["glsl", "essl1", "spirv", "msl"]) {
         if (anchor.classList.contains(lang)) {
             gCurrentLanguage = lang;
             selectShader(gCurrentShader);
@@ -375,11 +382,13 @@ function renderShaderStatus() {
     let statusString = "";
     if (shader) {
         const glsl = "glsl " + (gCurrentLanguage === "glsl" ? "active" : "");
+        const essl1 = "essl1 " + (gCurrentLanguage === "essl1" ? "active" : "");
         const msl = "msl " + (gCurrentLanguage === "msl" ? "active" : "");
         const spirv = "spirv " + (gCurrentLanguage === "spirv" ? "active" : "");
         switch (getShaderAPI()) {
             case "opengl":
                 statusString += ` &nbsp; <a class='status_button ${glsl}'>[GLSL]</a>`;
+                statusString += ` &nbsp; <a class='status_button ${essl1}'>[ESSL 1.0]</a>`;
                 break;
             case "metal":
                 statusString += ` &nbsp; <a class='status_button ${msl}'>[MSL]</a>`;
@@ -409,7 +418,7 @@ function selectShader(selection) {
     // Change the current language selection if necessary.
     switch (getShaderAPI(selection)) {
         case "opengl":
-            if (gCurrentLanguage !== "glsl") {
+            if (gCurrentLanguage !== "glsl" && gCurrentLanguage !== "essl1") {
                 gCurrentLanguage = "glsl";
             }
             break;

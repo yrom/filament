@@ -94,23 +94,34 @@ private:
     filaflat::BlobDictionary mDataBlobs;
 };
 
-ShaderReplacer::ShaderReplacer(Backend backend, const void* data, size_t size) :
+ShaderReplacer::ShaderReplacer(Backend backend, ShaderLanguage language,
+                               const void* data, size_t size) :
         mBackend(backend), mOriginalPackage(data, size) {
-    switch (backend) {
-        case Backend::OPENGL:
-            mMaterialTag = ChunkType::MaterialGlsl;
-            mDictionaryTag = ChunkType::DictionaryText;
-            break;
-        case Backend::METAL:
-            mMaterialTag = ChunkType::MaterialMetal;
-            mDictionaryTag = ChunkType::DictionaryText;
-            break;
-        case Backend::VULKAN:
-            mMaterialTag = ChunkType::MaterialSpirv;
-            mDictionaryTag = ChunkType::DictionarySpirv;
-            break;
-        default:
-            break;
+    if (backend == Backend::VULKAN) {
+        // Force these to be always in line with SPIR-V, since the web UI is technically sending
+        // over GLSL. There are a lot of hardcoded assumptions in this file about
+        // Vulkan/SPIR-V/mMaterialTag/mDictionaryTag, so it's best not to disturb the beast.
+        mMaterialTag = ChunkType::MaterialSpirv;
+        mDictionaryTag = ChunkType::DictionarySpirv;
+    } else {
+        switch (language) {
+            case backend::ShaderLanguage::ESSL1:
+                mMaterialTag = ChunkType::MaterialEssl1;
+                mDictionaryTag = ChunkType::DictionaryText;
+                break;
+            case backend::ShaderLanguage::ESSL3:
+                mMaterialTag = ChunkType::MaterialGlsl;
+                mDictionaryTag = ChunkType::DictionaryText;
+                break;
+            case backend::ShaderLanguage::MSL:
+                mMaterialTag = ChunkType::MaterialMetal;
+                mDictionaryTag = ChunkType::DictionaryText;
+                break;
+            case backend::ShaderLanguage::SPIRV:
+                mMaterialTag = ChunkType::MaterialSpirv;
+                mDictionaryTag = ChunkType::DictionarySpirv;
+                break;
+        }
     }
 }
 
