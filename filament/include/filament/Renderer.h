@@ -573,6 +573,10 @@ public:
      * getUserTime()
      */
     void resetUserTime();
+
+protected:
+    // prevent heap allocation
+    ~Renderer() = default;
 };
 
 } // namespace filament
