@@ -23,6 +23,7 @@
 #include <utils/Hash.h>
 
 #include <fstream>
+#include <string>
 
 #include "ShaderGenerator.h"
 #include "TrianglePrimitive.h"
@@ -39,6 +40,11 @@ using namespace filament::backend;
 
 using namespace image;
 #endif
+
+namespace {
+std::string const SHADER_VULKAN_TAG = "// select(vulkan) ";
+std::string const SHADER_METAL_TAG = "// select(metal) ";
+}
 
 namespace test {
 
@@ -191,6 +197,32 @@ void BackendTest::readPixelsAndAssertHash(const char* testName, size_t width, si
                 free(c);
             }, (void*)c);
     getDriverApi().readPixels(rt, 0, 0, width, height, std::move(pbd));
+}
+
+std::string BackendTest::transformShaderText(std::string const& shader) const {
+    std::string replacement;
+    switch (sBackend) {
+        case test::Backend::VULKAN:
+            replacement = SHADER_VULKAN_TAG;
+            break;
+        case test::Backend::METAL:
+            replacement = SHADER_METAL_TAG;
+            break;
+        default:
+            break;
+    }
+    if (replacement.size() == 0) {
+        return shader;
+    }
+    std::string replaced = shader;
+    while (true) {
+        size_t pos = replaced.find(replacement);
+        if (pos == std::string::npos) {
+            break;
+        }
+        replaced.replace(pos, replacement.length(), "");
+    }
+    return replaced;
 }
 
 class Environment : public ::testing::Environment {
