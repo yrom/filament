@@ -51,6 +51,10 @@ add_library(smol-v STATIC IMPORTED)
 set_target_properties(smol-v PROPERTIES IMPORTED_LOCATION
         ${FILAMENT_DIR}/lib/${ANDROID_ABI}/libsmol-v.a)
 
+add_library(SPIRV-Tools STATIC IMPORTED)
+set_target_properties(SPIRV-Tools PROPERTIES IMPORTED_LOCATION
+        ${FILAMENT_DIR}/lib/${ANDROID_ABI}/libSPIRV-Tools.a)
+
 if (FILAMENT_ENABLE_MATDBG)
     add_library(matdbg STATIC IMPORTED)
     set_target_properties(matdbg PROPERTIES IMPORTED_LOCATION
@@ -121,6 +125,7 @@ target_link_libraries(filament-jni
     $<$<STREQUAL:${FILAMENT_SUPPORTS_VULKAN},ON>:bluevk>
     $<$<STREQUAL:${FILAMENT_SUPPORTS_VULKAN},ON>:vkshaders>
     $<$<STREQUAL:${FILAMENT_SUPPORTS_VULKAN},ON>:smol-v>
+    $<$<STREQUAL:${FILAMENT_SUPPORTS_VULKAN},ON>:SPIRV-Tools>
 )
 
 target_include_directories(filament-jni PRIVATE

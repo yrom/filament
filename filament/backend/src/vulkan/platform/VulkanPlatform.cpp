@@ -331,6 +331,24 @@ VkDevice createLogicalDevice(VkPhysicalDevice physicalDevice,
     return device;
 }
 
+VulkanWorkarounds checkWorkarounds(VkPhysicalDevice device) {
+    VulkanWorkarounds workarounds {};
+    VkPhysicalDeviceDriverProperties driverProperties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 physicalDeviceProperties2 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &driverProperties,
+    };
+    vkGetPhysicalDeviceProperties2KHR(device, &physicalDeviceProperties2);
+    std::string_view driverName { driverProperties.driverName };
+    if (driverName.find("AMDVLK for Stadia") != std::string_view::npos) {
+        workarounds.convertSpecConstToConst = true;
+    }
+
+    return workarounds;
+}
+
 // This method is used to enable/disable extensions based on external factors (i.e.
 // driver/device workarounds).
 std::tuple<ExtensionSet, ExtensionSet> pruneExtensions(VkPhysicalDevice device,
@@ -672,6 +690,8 @@ Driver* VulkanPlatform::createDriver(void* sharedContext,
             = deviceExts.find(VK_EXT_DEBUG_MARKER_EXTENSION_NAME) != deviceExts.end();
 
     context.mDepthFormats = findAttachmentDepthFormats(mImpl->mPhysicalDevice);
+
+    context.mWorkarounds = checkWorkarounds(mImpl->mPhysicalDevice);
 
     assert_invariant(context.mDepthFormats.size() > 0);
 

@@ -726,10 +726,31 @@ add_subdirectory(${EXTERNAL}/jsmn/tnt)
 add_subdirectory(${EXTERNAL}/stb/tnt)
 add_subdirectory(${EXTERNAL}/getopt)
 
+# Vulkan backend has a dependency on spirv-tools for transforming spirv, which must be
+# added here (in addition to the backend dep) for generating the static lib in
+# `android-filament`.
+if (ANDROID AND FILAMENT_SUPPORTS_VULKAN)
+    add_subdirectory(${EXTERNAL}/spirv-tools)
+
+    # The following ensures that the static lib will be built and installed if
+    # we are building Vulkan for Android.
+    set(SPIRV_TOOLS_BUILD_STATIC TRUE)
+    set(ENABLE_SPIRV_TOOLS_INSTALL TRUE)
+
+    # For most other static libs compiled for Android their installation directory
+    # if set to `lib/${DIST_DIR}` directly with `install()`.  To avoid having
+    # to modify the spirv-tools/source/CMakeLists.txt, we set the
+    # `CMAKE_INSTALL_LIBDIR` to the right directory.
+    set(CMAKE_INSTALL_LIBDIR lib/${DIST_DIR})
+endif()
+
 if (FILAMENT_BUILD_FILAMAT OR IS_HOST_PLATFORM)
     # spirv-tools must come before filamat, as filamat relies on the presence of the
-    # spirv-tools_SOURCE_DIR variable.
-    add_subdirectory(${EXTERNAL}/spirv-tools)
+    # spirv-tools_SOURCE_DIR variable. If we are building for Android with Vulkan support,
+    # then this dependency should have been added above, and so we skip here.
+    if (NOT ANDROID OR NOT FILAMENT_SUPPORTS_VULKAN)
+        add_subdirectory(${EXTERNAL}/spirv-tools)
+    endif()
     add_subdirectory(${EXTERNAL}/glslang/tnt)
     add_subdirectory(${EXTERNAL}/spirv-cross/tnt)
     add_subdirectory(${LIBRARIES}/filamat)

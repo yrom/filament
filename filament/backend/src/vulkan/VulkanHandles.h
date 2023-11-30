@@ -38,7 +38,7 @@ class VulkanTimestamps;
 
 struct VulkanProgram : public HwProgram, VulkanResource {
 
-    VulkanProgram(VkDevice device, const Program& builder) noexcept;
+    VulkanProgram(VulkanContext const& context, VkDevice device, Program const& builder) noexcept;
 
     struct CustomSamplerInfo {
         uint8_t groupIndex;
@@ -72,13 +72,17 @@ struct VulkanProgram : public HwProgram, VulkanResource {
 private:
     // TODO: handle compute shaders.
     // The expected order of shaders - from frontend to backend - is vertex, fragment, compute.
-    static constexpr uint8_t MAX_SHADER_MODULES = 2;
+    static constexpr uint8_t const MAX_SHADER_MODULES = 2;
+
+    // Note that bools are 4-bytes in Vulkan
+    // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkBool32.html
+    static constexpr uint8_t const CONSTANT_SIZE = 4;
 
     struct PipelineInfo {
         PipelineInfo(size_t specConstsCount) :
             bindingToSamplerIndex(MAX_SAMPLER_COUNT, 0xffff),
             specConsts(specConstsCount, VkSpecializationMapEntry{}),
-            specConstData(new char[specConstsCount * 4])
+            specConstData(new char[specConstsCount * CONSTANT_SIZE])
         {}
 
         // This bitset maps to each of the sampler in the sampler groups associated with this

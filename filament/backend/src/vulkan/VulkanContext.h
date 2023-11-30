@@ -86,6 +86,10 @@ struct VulkanRenderPass {
     int currentSubpass;
 };
 
+struct VulkanWorkarounds {
+    bool convertSpecConstToConst = false;
+};
+
 // This is a collection of immutable data about the vulkan context. This actual handles to the
 // context are stored in VulkanPlatform.
 struct VulkanContext {
@@ -125,6 +129,10 @@ public:
         return mDebugUtilsSupported;
     }
 
+    inline VulkanWorkarounds const& workarounds() const noexcept {
+        return mWorkarounds;
+    }
+
 private:
     VkPhysicalDeviceMemoryProperties mMemoryProperties = {};
     VkPhysicalDeviceProperties mPhysicalDeviceProperties = {};
@@ -133,6 +141,8 @@ private:
     bool mDebugUtilsSupported = false;
 
     VkFormatList mDepthFormats;
+
+    VulkanWorkarounds mWorkarounds;
 
     // For convenience so that VulkanPlatform can initialize the private fields.
     friend class VulkanPlatform;
