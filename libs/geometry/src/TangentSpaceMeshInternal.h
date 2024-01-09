@@ -21,22 +21,89 @@
 
 #include <math/mat3.h>
 #include <math/norm.h>
+#include <math/quat.h>
 
 #include <utils/Panic.h>
 
+#include <unordered_map>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace filament::geometry {
 
 using namespace filament::math;
+
+namespace {
+
 using Algorithm = TangentSpaceMesh::Algorithm;
+using AuxAttribute = TangentSpaceMesh::AuxAttribute;
+using InData = TangentSpaceMesh::InData;
+
+} // namespace
+
+template<typename InputType>
+inline const InputType* pointerAdd(InputType const* ptr, size_t index, size_t stride) noexcept {
+    return (InputType*) (((uint8_t const*) ptr) + (index * stride));
+}
+
+template<typename InputType>
+inline InputType* pointerAdd(InputType* ptr, size_t index, size_t stride) noexcept {
+    return (InputType*) (((uint8_t*) ptr) + (index * stride));
+}
+
+// Defines the actual implementation used to compute the TBN, where as TangentSpaceMesh::Algorithm
+// is a hint that the client can provide.
+enum class AlgorithmImpl : uint8_t {
+    INVALID = 0,
+
+    MIKKTSPACE = 1,
+    LENGYEL = 2,
+    HUGHES_MOLLER = 3,
+    FRISVAD = 4,
+
+    // Generating flat shading will remesh the input
+    FLAT_SHADING = 5,
+    TANGENTS_PROVIDED = 6,
+};
+
+enum class AttributeImpl : uint8_t {
+    UV1 = 0x0,     // float2
+    COLORS = 0x1,  // float4
+    JOINTS = 0x2,  // ushort4
+    WEIGHTS = 0x3, // float4
+    NORMALS = 0x4, // float3
+    UV0 = 0x5,     // float2
+    TANGENTS = 0x6,// float4
+    POSITIONS = 0x7,     // float3
+    TANGENT_SPACE = 0x8, // quatf
+};
+
+#define AUX_ATTRIBUTE_MATCH(attrib) static_assert((uint8_t) AuxAttribute::attrib == (uint8_t) AttributeImpl::attrib)
+
+// These enums are exposed in the public API, we need to make sure they match the internal enums.
+AUX_ATTRIBUTE_MATCH(UV1);
+AUX_ATTRIBUTE_MATCH(COLORS);
+AUX_ATTRIBUTE_MATCH(JOINTS);
+AUX_ATTRIBUTE_MATCH(WEIGHTS);
+
+#undef AUX_ATTRIBUTE_MATCH
+
+namespace {
+
+// Maps an attribute to an array and stride.
+struct AttributeDataStride {
+    InData data;
+    size_t stride = 0;
+};
 
 template<typename T>
 class InternalArray {
 public:
-    void borrow(T const* ptr) {
+    void borrow(T const* ptr, size_t stride=sizeof(T)) {
         assert_invariant(mAllocated.empty());
         mBorrowed = ptr;
+        mBorrowedStride = stride;
     }
 
     T* allocate(size_t size) {
@@ -50,57 +117,258 @@ public:
         return mBorrowed || !mAllocated.empty();
     }
 
-    const T* get() {
-        assert_invariant((bool) this);
+    T const& operator [](int i) const {
         if (mBorrowed) {
-            return mBorrowed;
+            return *pointerAdd(mBorrowed, i, mBorrowedStride);
         }
-        return mAllocated.data();
+        return mAllocated[i];
+    }
+
+    T& operator [](int i) {
+        if (mBorrowed) {
+            return *pointerAdd(mBorrowed, i, mBorrowedStride);
+        }
+        return mAllocated[i];
     }
 
 private:
     std::vector<T> mAllocated;
     T const* mBorrowed = nullptr;
+    size_t mBorrowedStride = sizeof(T);
 };
+
+using ArrayType = std::variant<InternalArray<float2>, InternalArray<float3>, InternalArray<float4>,
+        InternalArray<ushort3>, InternalArray<ushort4>, InternalArray<quatf>>;
+
+using AttributeMap = std::unordered_map<AttributeImpl, AttributeDataStride>;
+
+ArrayType toArray(AttributeImpl attribute) {
+    switch (attribute) {
+        case AttributeImpl::UV1: return InternalArray<float2> {};
+        case AttributeImpl::COLORS: return InternalArray<float4> {};
+        case AttributeImpl::JOINTS: return InternalArray<ushort4> {};
+        case AttributeImpl::WEIGHTS: return InternalArray<float4> {};
+        case AttributeImpl::NORMALS: return InternalArray<float3> {};
+        case AttributeImpl::UV0: return InternalArray<float2> {};
+        case AttributeImpl::TANGENTS: return InternalArray<float4> {};
+        case AttributeImpl::POSITIONS: return InternalArray<float3> {};
+        case AttributeImpl::TANGENT_SPACE: return InternalArray<quatf> {};
+    }
+}
+
+} // namespace
 
 struct TangentSpaceMeshInput {
     size_t vertexCount = 0;
-    float3 const* normals = nullptr;
-    float2 const* uvs = nullptr;
-    float3 const* positions = nullptr;
     ushort3 const* triangles16 = nullptr;
     uint3 const* triangles32 = nullptr;
 
-    size_t normalStride = 0;
-    size_t uvStride = 0;
-    size_t positionStride = 0;
     size_t triangleCount = 0;
+
+    inline float3 const* positions() const {
+        return aux<filament::math::float3>(AttributeImpl::POSITIONS);
+    }
+
+    inline size_t positionsStride() const {
+        return strideSafe<filament::math::float3>(AttributeImpl::POSITIONS);
+    }
+
+    inline float2 const* uvs() const {
+        return aux<filament::math::float2>(AttributeImpl::UV0);
+    }
+
+    inline size_t uvsStride() const {
+        return strideSafe<filament::math::float2>(AttributeImpl::UV0);
+    }
+
+    inline float4 const* tangents() const {
+        return aux<filament::math::float4>(AttributeImpl::TANGENTS);
+    }
+
+    inline size_t tangentsStride() const {
+        return strideSafe<filament::math::float4>(AttributeImpl::TANGENTS);
+    }
+
+    inline float3 const* normals() const {
+        return aux<filament::math::float3>(AttributeImpl::NORMALS);
+    }
+
+    inline size_t normalsStride() const {
+        return strideSafe<filament::math::float3>(AttributeImpl::NORMALS);
+    }
+
+    static inline size_t attributeSize(AttributeImpl attribute) {
+        switch (attribute) {
+            case AttributeImpl::UV1: return sizeof(float2);
+            case AttributeImpl::COLORS: return sizeof(float4);
+            case AttributeImpl::JOINTS: return sizeof(ushort4);
+            case AttributeImpl::WEIGHTS: return sizeof(float4);
+            case AttributeImpl::NORMALS: return sizeof(float3);
+            case AttributeImpl::UV0: return sizeof(float2);
+            case AttributeImpl::TANGENTS: return sizeof(float4);
+            case AttributeImpl::POSITIONS: return sizeof(float3);
+            case AttributeImpl::TANGENT_SPACE:
+                PANIC_POSTCONDITION("Invalid attribute found in input");                                  }
+    }
+
+    inline size_t stride(AttributeImpl attribute) const {
+        auto res = attributeData.find(attribute);
+        assert_invariant(res != attributeData.end());
+        return res->second.stride ? res->second.stride : attributeSize(attribute);
+    }
+
+    template<typename DataType>
+    inline size_t strideSafe(AttributeImpl attribute) const {
+        auto res = attributeData.find(attribute);
+        if (res == attributeData.end()) {
+            return sizeof(DataType);
+
+        }
+        return res->second.stride ? res->second.stride : sizeof(DataType);
+    }
+
+    uint8_t const* raw(AttributeImpl attribute) const {
+        switch (attribute) {
+            case AttributeImpl::UV1:
+                return (uint8_t const*) aux<float2>(attribute);
+            case AttributeImpl::COLORS:
+                return (uint8_t const*) aux<float4>(attribute);
+            case AttributeImpl::JOINTS:
+                return (uint8_t const*) aux<ushort4>(attribute);
+            case AttributeImpl::WEIGHTS:
+                return (uint8_t const*) aux<float4>(attribute);
+            case AttributeImpl::NORMALS:
+                return (uint8_t const*) aux<float3>(attribute);
+            case AttributeImpl::UV0:
+                return (uint8_t const*) aux<float2>(attribute);
+            case AttributeImpl::TANGENTS:
+                return (uint8_t const*) aux<float4>(attribute);
+            case AttributeImpl::POSITIONS:
+                return (uint8_t const*) aux<float3>(attribute);
+            case AttributeImpl::TANGENT_SPACE:
+                PANIC_POSTCONDITION("Invalid attribute found in input");
+        }
+    }
+
+    // Pass back the std::variant instead of the content.
+    InData data(AttributeImpl attribute) const {
+        auto res = attributeData.find(attribute);
+        assert_invariant(res != attributeData.end());
+        return res->second.data;
+    }
+
+    template<typename DataType>
+    inline DataType const* aux(AttributeImpl attribute) const {
+        auto res = attributeData.find(attribute);
+        if (res == attributeData.end()) {
+            return nullptr;
+        }
+        return std::get<DataType const*>(res->second.data);
+    }
+
+    inline std::vector<AttributeImpl> getAuxAttributes() const {
+        std::vector<AttributeImpl> ret;
+        for (auto [attrib, data]: attributeData) {
+            // TANGENT_SPACE is only used for output
+            assert_invariant(attrib != AttributeImpl::TANGENT_SPACE);
+
+            if (attrib == AttributeImpl::POSITIONS || attrib == AttributeImpl::TANGENTS ||
+                    attrib == AttributeImpl::UV0 || attrib == AttributeImpl::NORMALS) {
+                continue;
+            }
+            ret.push_back(attrib);
+        }
+        return ret;
+    }
+
+    AttributeMap attributeData;
 
     Algorithm algorithm;
 };
 
 struct TangentSpaceMeshOutput {
-    Algorithm algorithm;
+
+    TangentSpaceMeshOutput() {
+        for (AttributeImpl attrib:
+                {AttributeImpl::TANGENT_SPACE, AttributeImpl::UV0, AttributeImpl::POSITIONS}) {
+            attributeData.emplace(std::make_pair(attrib, toArray(attrib)));
+        }
+    }
+
+    InternalArray<quatf>& tspace() {
+        return aux<quatf>(AttributeImpl::TANGENT_SPACE);
+    }
+
+    InternalArray<float2>& uvs() {
+        return aux<float2>(AttributeImpl::UV0);
+    }
+
+    InternalArray<float3>& positions() {
+        return aux<float3>(AttributeImpl::POSITIONS);
+    }
+
+    template<typename DataType>
+    InternalArray<DataType>& aux(AttributeImpl attrib) {
+        if (attributeData.find(attrib) == attributeData.end()) {
+            attributeData.emplace(std::make_pair(attrib, toArray(attrib)));
+        }
+        return std::get<InternalArray<DataType>>(attributeData[attrib]);
+    }
+
+    void passthrough(AttributeMap const& inAttributeMap, std::vector<AttributeImpl> const& attributes) {
+        auto const borrow = [&inAttributeMap, this](AttributeImpl attrib) {
+            auto ref = inAttributeMap.find(attrib);
+            if (ref == inAttributeMap.end()) {
+                return;
+            }
+            InData const& data = ref->second.data;
+            size_t const stride = ref->second.stride;
+            switch(attrib) {
+                case AttributeImpl::UV1:
+                    aux<float2>(attrib).borrow(std::get<float2 const*>(data), stride);
+                    break;
+                case AttributeImpl::COLORS:
+                    aux<float4>(attrib).borrow(std::get<float4 const*>(data), stride);
+                    break;
+                case AttributeImpl::JOINTS:
+                    aux<ushort4>(attrib).borrow(std::get<ushort4 const*>(data), stride);
+                    break;
+                case AttributeImpl::WEIGHTS:
+                    aux<float4>(attrib).borrow(std::get<float4 const*>(data), stride);
+                    break;
+                case AttributeImpl::NORMALS:
+                    aux<float3>(attrib).borrow(std::get<float3 const*>(data), stride);
+                    break;
+                case AttributeImpl::UV0:
+                    aux<float2>(attrib).borrow(std::get<float2 const*>(data), stride);
+                    break;
+                case AttributeImpl::TANGENTS:
+                    aux<float4>(attrib).borrow(std::get<float4 const*>(data), stride);
+                    break;
+                case AttributeImpl::POSITIONS:
+                    aux<float3>(attrib).borrow(std::get<float3 const*>(data), stride);
+                    break;
+                case AttributeImpl::TANGENT_SPACE:
+                    PANIC_POSTCONDITION("Invalid attribute found in input");
+                    break;
+            }
+        };
+
+        for (AttributeImpl attrib: attributes) {
+            borrow(attrib);
+        }
+    }
+
+    AlgorithmImpl algorithm;
 
     size_t triangleCount = 0;
     size_t vertexCount = 0;
 
-    InternalArray<quatf> tangentSpace;
-    InternalArray<float2> uvs;
-    InternalArray<float3> positions;
     InternalArray<uint3> triangles32;
     InternalArray<ushort3> triangles16;
+
+    std::unordered_map<AttributeImpl, ArrayType> attributeData;
 };
-
-template<typename InputType>
-inline const InputType* pointerAdd(InputType const* ptr, size_t index, size_t stride) noexcept {
-    return (InputType*) (((uint8_t const*) ptr) + (index * stride));
-}
-
-template<typename InputType>
-inline InputType* pointerAdd(InputType* ptr, size_t index, size_t stride) noexcept {
-    return (InputType*) (((uint8_t*) ptr) + (index * stride));
-}
 
 }// namespace filament::geometry
 
