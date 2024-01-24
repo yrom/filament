@@ -32,6 +32,7 @@ set(SRCS
         src/DracoCache.cpp
         src/DracoCache.h
         src/FFilamentAsset.h
+        src/FFilamentAsset.cpp
         src/FFilamentInstance.h
         src/FilamentAsset.cpp
         src/FilamentInstance.cpp

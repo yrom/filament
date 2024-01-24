@@ -35,6 +35,7 @@
 
 #include <math/mat4.h>
 
+#include <utils/bitset.h>
 #include <utils/FixedCapacityVector.h>
 #include <utils/CString.h>
 #include <utils/Entity.h>
@@ -48,7 +49,10 @@
 
 #include <tsl/htrie_map.h>
 
+#include <future>
+#include <variant>
 #include <vector>
+#include <unordered_map>
 
 #ifdef NDEBUG
 #define GLTFIO_VERBOSE 0
@@ -73,14 +77,93 @@ namespace filament::gltfio {
 
 struct Wireframe;
 
-// Encapsulates VertexBuffer::setBufferAt() or IndexBuffer::setBuffer().
-struct BufferSlot {
-    const cgltf_accessor* accessor;
-    cgltf_attribute_type attribute;
-    int bufferIndex; // for vertex buffer and morph target buffer only
-    VertexBuffer* vertexBuffer;
-    IndexBuffer* indexBuffer;
-    MorphTargetBuffer* morphTargetBuffer;
+// This class is used to store the "temporary" buffers created before we have a VertexBuffer or
+// MorphTargetBuffer. We cannot create VB or MTB beforehand because we do not know the number of
+// vertices of the primitive until the tangents are computed (some methods will remesh the input).
+template<typename BufferType>
+struct BufferProducer {
+    BufferProducer() {}
+
+    // We delay the setting of count (either vertexCount or tangentCount) until the tangents are
+    // computed
+    void count(size_t count) { mCount = count; }
+
+    void setExpectBufferAt(int slot) {
+        assert_invariant(slot >= 0 && slot < 256);
+        mExpected.set(static_cast<uint8_t>(slot));
+    }
+
+    std::future<BufferType> getFuture() { return std::move(mPromise.get_future()); }
+
+protected:
+    static_assert(MAX_MORPH_TARGETS <= 256);
+
+    utils::bitset256 mExpected;
+    std::promise<BufferType> mPromise;
+    size_t mCount = 0;
+};
+
+struct VertexBufferProducer : public BufferProducer<VertexBuffer*> {
+
+    // Override
+    void setBufferObjectAt(FFilamentAsset* asset, Engine* engine, uint8_t slot,
+            BufferObject* bufferObject);
+
+    inline void setDummyObjectSlot(int dummyObjectSlot) { mDummyObjectSlot = dummyObjectSlot; }
+
+private:
+    std::unordered_map<uint8_t, BufferObject*> mBuffers;
+    int mDummyObjectSlot = -1;
+};
+
+struct MorphTargetBufferProducer : public BufferProducer<MorphTargetBuffer*> {
+
+    // Note that this will pass the ownership of the data arrays to this class.
+    void setPositionAndTangentsAt(FFilamentAsset* asset, Engine* engine, int targetIndex,
+            math::float3 const* positions, math::short4 const* tangents);
+
+private:
+    using PositionTangent = std::pair<math::float3 const*, math::short4 const*>;
+    std::unordered_map<int, PositionTangent> mData;
+};
+
+struct IndexBufferProducer : public BufferProducer<IndexBuffer*> {
+
+    // Note that the count() here will be the number of triangles.
+
+    // Note that this will pass the ownership of the data arrays to this class.
+    void setBuffer(FFilamentAsset* asset, Engine* engine, math::uint3 const* triangles);
+
+    // Note that this will pass the ownership of the data arrays to this class.
+    void setBuffer(FFilamentAsset* asset, Engine* engine, math::ushort3 const* triangles);
+};
+
+typedef std::shared_ptr<VertexBufferProducer> VertexBufferProducerPtr;
+typedef std::shared_ptr<MorphTargetBufferProducer> MorphTargetBufferProducerPtr;
+typedef std::shared_ptr<IndexBufferProducer> IndexBufferProducerPtr;
+
+// Encapsulates the work to gather and upload the primitive buffers.
+struct PrimitiveWorkload {
+    PrimitiveWorkload(cgltf_primitive const* primitive) : primitive(primitive) {}
+
+    cgltf_primitive const* primitive;
+
+    IndexBufferProducerPtr indices;
+    VertexBufferProducerPtr vertices;
+    MorphTargetBufferProducerPtr targets;
+
+    // The Filament Attribute is defined as a type, a slot, and whether the attribute is normalized or not.
+    using FilamentAttribute = std::tuple<VertexAttribute, int, bool>;
+
+    using Attribute = std::pair<cgltf_attribute_type, int>;
+    std::unordered_map<Attribute, FilamentAttribute> attributesMap;
+    bool generateFlatNormals = false;
+
+    // A set of morph targets to generate tangents for.
+    std::vector<int> morphTargets;
+
+    static constexpr int const DUMMY_0 = -1;
+    static constexpr int const DUMMY_1 = -2;
 };
 
 // Stores a connection between Texture and MaterialInstance; consumed by resource loader so that it
@@ -100,11 +183,13 @@ struct TextureSlot {
 // small cache. There is one cache entry per cgltf_mesh. Each entry is a list of primitives, where a
 // "primitive" is a reference to a Filament VertexBuffer and IndexBuffer.
 struct Primitive {
-    VertexBuffer* vertices = nullptr;
-    IndexBuffer* indices = nullptr;
     Aabb aabb; // object-space bounding box
     UvMap uvmap; // mapping from each glTF UV set to either UV0 or UV1 (8 bytes)
-    MorphTargetBuffer* targets = nullptr;
+
+    std::future<MorphTargetBuffer*> targets;
+    std::future<VertexBuffer*> vertices;
+    std::future<IndexBuffer*> indices;
+
 };
 using MeshCache = utils::FixedCapacityVector<utils::FixedCapacityVector<Primitive>>;
 
@@ -271,10 +356,6 @@ struct FFilamentAsset : public FilamentAsset {
     utils::CString mAssetExtras;
     bool mDetachedFilamentComponents = false;
 
-    // Sentinels for situations where ResourceLoader needs to generate data.
-    const cgltf_accessor mGenerateNormals = {};
-    const cgltf_accessor mGenerateTangents = {};
-
     // Encapsulates reference-counted source data, which includes the cgltf hierachy
     // and potentially also includes buffer data that can be uploaded to the GPU.
     struct SourceAsset {
@@ -314,8 +395,7 @@ struct FFilamentAsset : public FilamentAsset {
     MeshCache mMeshCache;
 
     // Asset information that is produced by AssetLoader and consumed by ResourceLoader:
-    std::vector<BufferSlot> mBufferSlots;
-    std::vector<std::pair<const cgltf_primitive*, VertexBuffer*> > mPrimitives;
+    std::vector<std::shared_ptr<PrimitiveWorkload>> mPrimitiveWorkloads;
 };
 
 FILAMENT_DOWNCAST(FilamentAsset)

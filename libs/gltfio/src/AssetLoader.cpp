@@ -57,6 +57,9 @@
 
 #include "downcast.h"
 
+#include <chrono>
+
+using namespace std::chrono_literals;
 using namespace filament;
 using namespace filament::math;
 using namespace utils;
@@ -706,7 +709,13 @@ void FAssetLoader::createRenderable(const cgltf_node* node, Entity entity, const
         fAsset->mDependencyGraph.addEdge(entity, mi);
         builder.material(index, mi);
 
-        assert_invariant(outputPrim->vertices);
+        assert_invariant(outputPrim->vertices.wait_for(0s)  == std::future_status::ready);
+        assert_invariant(outputPrim->indices.wait_for(0s)  == std::future_status::ready);
+        assert_invariant(outputPrim->targets.wait_for(0s)  == std::future_status::ready);
+
+        auto const vertices = outputPrim->vertices.get();
+        auto const indices = outputPrim->indices.get();
+        auto const targets = outputPrim->targets.get();
 
         // Expand the object-space bounding box.
         aabb.min = min(outputPrim->aabb.min, aabb.min);
@@ -716,11 +725,11 @@ void FAssetLoader::createRenderable(const cgltf_node* node, Entity entity, const
         // calling geometry() on the builder. It appears that the glTF spec does not have
         // facilities for these parameters, which is not a huge loss since some of the buffer
         // view and accessor features already have this functionality.
-        builder.geometry(index, primType, outputPrim->vertices, outputPrim->indices);
+        builder.geometry(index, primType, vertices, indices);
 
         if (numMorphTargets) {
-            assert_invariant(outputPrim->targets);
-            builder.morphing(0, index, outputPrim->targets);
+            assert_invariant(targets);
+            builder.morphing(0, index, targets);
         }
     }
 
@@ -800,81 +809,46 @@ bool FAssetLoader::createPrimitive(const cgltf_primitive& inPrim, const char* na
     // zero-instance assets to exist. This will be useful for "preloading", which is a feature
     // request from Google.
 
-    // Create a little lambda that appends to the asset's vertex buffer slots.
-    auto slots = &fAsset->mBufferSlots;
-    auto addBufferSlot = [slots](BufferSlot entry) {
-        slots->push_back(entry);
-    };
+    auto workload = std::make_shared<PrimitiveWorkload>(&inPrim);
 
     // In glTF, each primitive may or may not have an index buffer.
-    IndexBuffer* indices = nullptr;
     const cgltf_accessor* accessor = inPrim.indices;
-    if (accessor) {
+    if (accessor || inPrim.attributes_count > 0) {
         IndexBuffer::IndexType indexType;
         if (!getIndexType(accessor->component_type, &indexType)) {
             utils::slog.e << "Unrecognized index type in " << name << utils::io::endl;
             return false;
         }
 
-        indices = IndexBuffer::Builder()
-            .indexCount(accessor->count)
-            .bufferType(indexType)
-            .build(mEngine);
+        workload->indices = std::make_shared<IndexBufferProducer>();
+        outPrim->indices = workload->indices->getFuture();
 
-        BufferSlot slot = { accessor };
-        slot.indexBuffer = indices;
-        addBufferSlot(slot);
-    } else if (inPrim.attributes_count > 0) {
-        // If a primitive does not have an index buffer, generate a trivial one now.
-        const uint32_t vertexCount = inPrim.attributes[0].data->count;
-
-        indices = IndexBuffer::Builder()
-            .indexCount(vertexCount)
-            .bufferType(IndexBuffer::IndexType::UINT)
-            .build(mEngine);
-
-        const size_t indexDataSize = vertexCount * sizeof(uint32_t);
-        uint32_t* indexData = (uint32_t*) malloc(indexDataSize);
-        for (size_t i = 0; i < vertexCount; ++i) {
-            indexData[i] = i;
-        }
-        IndexBuffer::BufferDescriptor bd(indexData, indexDataSize, FREE_CALLBACK);
-        indices->setBuffer(mEngine, std::move(bd));
+        // TODO: Handle no index accessor case
+        // TODO: need to add to mAsset->mIndexBuffers
     }
-    fAsset->mIndexBuffers.push_back(indices);
 
-    VertexBuffer::Builder vbb;
-    vbb.enableBufferObjects();
+    auto vertexProducer = std::make_shared<VertexBufferProducer>();
+    outPrim->vertices = vertexProducer->getFuture();
 
     bool hasUv0 = false, hasUv1 = false, hasVertexColor = false, hasNormals = false;
-    uint32_t vertexCount = 0;
-
-    const size_t firstSlot = fAsset->mBufferSlots.size();
-    int slot = 0;
+    int slotCount = 0;
 
     for (cgltf_size aindex = 0; aindex < inPrim.attributes_count; aindex++) {
-        const cgltf_attribute& attribute = inPrim.attributes[aindex];
-        const int index = attribute.index;
-        const cgltf_attribute_type atype = attribute.type;
-        const cgltf_accessor* accessor = attribute.data;
+        cgltf_attribute const attribute = inPrim.attributes[aindex];
+        int const index = attribute.index;
+        cgltf_attribute_type const atype = attribute.type;
+        cgltf_accessor const* accessor = attribute.data;
 
-        // The glTF tangent data is ignored here, but honored in ResourceLoader.
-        if (atype == cgltf_attribute_type_tangent) {
-            continue;
-        }
+        PrimitiveWorkload::Attribute const cattr = std::make_pair(atype, index);
 
         // At a minimum, surface orientation requires normals to be present in the source data.
         // Here we re-purpose the normals slot to point to the quats that get computed later.
         if (atype == cgltf_attribute_type_normal) {
-            vbb.attribute(VertexAttribute::TANGENTS, slot, VertexBuffer::AttributeType::SHORT4);
-            vbb.normalized(VertexAttribute::TANGENTS);
+            PrimitiveWorkload::FilamentAttribute const fattr{VertexAttribute::TANGENTS, slotCount++,
+                    true};
             hasNormals = true;
-            addBufferSlot({&fAsset->mGenerateTangents, atype, slot++});
+            workload->attributesMap[cattr] = fattr;
             continue;
-        }
-
-        if (atype == cgltf_attribute_type_color) {
-            hasVertexColor = true;
         }
 
         // Translate the cgltf attribute enum into a Filament enum.
@@ -923,7 +897,9 @@ bool FAssetLoader::createPrimitive(const cgltf_primitive& inPrim, const char* na
             }
         }
 
-        vertexCount = accessor->count;
+        if (atype == cgltf_attribute_type_color) {
+            hasVertexColor = true;
+        }
 
         // The positions accessor is required to have min/max properties, use them to expand
         // the bounding box for this primitive.
@@ -940,22 +916,18 @@ bool FAssetLoader::createPrimitive(const cgltf_primitive& inPrim, const char* na
             slog.e << "Unsupported accessor type in " << name << io::endl;
             return false;
         }
-        const int stride = (fatype == actualType) ? accessor->stride : 0;
 
         // The cgltf library provides a stride value for all accessors, even though they do not
         // exist in the glTF file. It is computed from the type and the stride of the buffer view.
         // As a convenience, cgltf also replaces zero (default) stride with the actual stride.
-        vbb.attribute(semantic, slot, fatype, 0, stride);
-        vbb.normalized(semantic, accessor->normalized);
-        addBufferSlot({accessor, atype, slot++});
+        // const int stride = (fatype == actualType) ? accessor->stride : 0;
+
+        workload->attributesMap[cattr] = { semantic, slotCount++, accessor->normalized };
     }
 
     // If the model is lit but does not have normals, we'll need to generate flat normals.
     if (requiredAttributes.test(VertexAttribute::TANGENTS) && !hasNormals) {
-        vbb.attribute(VertexAttribute::TANGENTS, slot, VertexBuffer::AttributeType::SHORT4);
-        vbb.normalized(VertexAttribute::TANGENTS);
-        cgltf_attribute_type atype = cgltf_attribute_type_normal;
-        addBufferSlot({&fAsset->mGenerateNormals, atype, slot++});
+        workload->generateFlatNormals = true;
     }
 
     cgltf_size targetsCount = inPrim.targets_count;
@@ -966,149 +938,118 @@ bool FAssetLoader::createPrimitive(const cgltf_primitive& inPrim, const char* na
         targetsCount = MAX_MORPH_TARGETS;
     }
 
-    const Aabb baseAabb(outPrim->aabb);
+    if (targetsCount > 0) {
+        workload->targets = std::make_shared<MorphTargetBufferProducer>();
+        outPrim->targets = workload->targets->getFuture();
+    }
+
+    Aabb const baseAabb(outPrim->aabb);
     for (cgltf_size targetIndex = 0; targetIndex < targetsCount; targetIndex++) {
-        const cgltf_morph_target& morphTarget = inPrim.targets[targetIndex];
-        for (cgltf_size aindex = 0; aindex < morphTarget.attributes_count; aindex++) {
-            const cgltf_attribute& attribute = morphTarget.attributes[aindex];
-            const cgltf_accessor* accessor = attribute.data;
-            const cgltf_attribute_type atype = attribute.type;
+        bool morphTargetHasNormals = false;
+        cgltf_morph_target const& target = inPrim.targets[targetIndex];
+        for (cgltf_size aindex = 0; aindex < target.attributes_count; aindex++) {
+            cgltf_attribute const& attribute = target.attributes[aindex];
+            cgltf_accessor const* accessor = attribute.data;
+            cgltf_attribute_type const atype = attribute.type;
 
-            // The glTF normal and tangent data are ignored here, but honored in ResourceLoader.
-            if (atype == cgltf_attribute_type_normal || atype == cgltf_attribute_type_tangent) {
-                continue;
-            }
-
-            if (atype != cgltf_attribute_type_position) {
+            if (atype != cgltf_attribute_type_position || atype == cgltf_attribute_type_normal ||
+                    atype == cgltf_attribute_type_tangent) {
                 utils::slog.e << "Only positions, normals, and tangents can be morphed."
-                        << utils::io::endl;
+                              << utils::io::endl;
                 return false;
             }
 
-            if (!accessor->has_min || !accessor->has_max) {
-                continue;
-            }
-
-            Aabb targetAabb(baseAabb);
-            const float* minp = &accessor->min[0];
-            const float* maxp = &accessor->max[0];
-
-            // We assume that the range of morph target weight is [0, 1].
-            targetAabb.min += float3(minp[0], minp[1], minp[2]);
-            targetAabb.max += float3(maxp[0], maxp[1], maxp[2]);
-
-            outPrim->aabb.min = min(outPrim->aabb.min, targetAabb.min);
-            outPrim->aabb.max = max(outPrim->aabb.max, targetAabb.max);
-
-            VertexBuffer::AttributeType fatype;
-            VertexBuffer::AttributeType actualType;
-            if (!getElementType(accessor->type, accessor->component_type, &fatype, &actualType)) {
+            if (VertexBuffer::AttributeType fatype, actualType; !getElementType(accessor->type,
+                        accessor->component_type, &fatype, &actualType)) {
                 slog.e << "Unsupported accessor type in " << name << io::endl;
                 return false;
             }
+
+            if (atype == cgltf_attribute_type_position && accessor->has_min && accessor->has_max) {
+                Aabb targetAabb(baseAabb);
+                float const* minp = &accessor->min[0];
+                float const* maxp = &accessor->max[0];
+
+                // We assume that the range of morph target weight is [0, 1].
+                targetAabb.min += float3(minp[0], minp[1], minp[2]);
+                targetAabb.max += float3(maxp[0], maxp[1], maxp[2]);
+
+                outPrim->aabb.min = min(outPrim->aabb.min, targetAabb.min);
+                outPrim->aabb.max = max(outPrim->aabb.max, targetAabb.max);
+            }
+
+            if (atype == cgltf_attribute_type_tangent) {
+                morphTargetHasNormals = true;
+                workload->morphTargets.push_back(targetIndex);
+            }
+        }
+        // Generate flat normals if necessary.
+        if (!morphTargetHasNormals && inPrim.material && !inPrim.material->unlit) {
+            workload->morphTargets.push_back(targetIndex);
         }
     }
 
+    auto vertexCount = accessor->count;
     if (vertexCount == 0) {
         slog.e << "Empty vertex buffer in " << name << io::endl;
         return false;
     }
 
-    vbb.vertexCount(vertexCount);
-
     // We provide a single dummy buffer (filled with 0xff) for all unfulfilled vertex requirements.
     // The color data should be a sequence of normalized UBYTE4, so dummy UVs are USHORT2 to make
     // the sizes match.
-    bool needsDummyData = false;
 
     if (mMaterials.needsDummyData(VertexAttribute::UV0) && !hasUv0) {
-        needsDummyData = true;
-        hasUv0 = true;
-        vbb.attribute(VertexAttribute::UV0, slot, VertexBuffer::AttributeType::USHORT2);
-        vbb.normalized(VertexAttribute::UV0);
+        PrimitiveWorkload::Attribute cattr =
+                std::make_pair(cgltf_attribute_type_texcoord, PrimitiveWorkload::DUMMY_0);
+        PrimitiveWorkload::FilamentAttribute const fattr{VertexAttribute::UV0, slotCount, true};
+        workload->attributesMap[cattr] = fattr;
     }
 
     if (mMaterials.needsDummyData(VertexAttribute::UV1) && !hasUv1) {
-        hasUv1 = true;
-        needsDummyData = true;
-        vbb.attribute(VertexAttribute::UV1, slot, VertexBuffer::AttributeType::USHORT2);
-        vbb.normalized(VertexAttribute::UV1);
+        PrimitiveWorkload::Attribute cattr =
+                std::make_pair(cgltf_attribute_type_texcoord, PrimitiveWorkload::DUMMY_1);
+        PrimitiveWorkload::FilamentAttribute const fattr{VertexAttribute::UV1, slotCount, true};
+        workload->attributesMap[cattr] = fattr;
     }
 
     if (mMaterials.needsDummyData(VertexAttribute::COLOR) && !hasVertexColor) {
-        needsDummyData = true;
-        vbb.attribute(VertexAttribute::COLOR, slot, VertexBuffer::AttributeType::UBYTE4);
-        vbb.normalized(VertexAttribute::COLOR);
+        PrimitiveWorkload::Attribute cattr =
+                std::make_pair(cgltf_attribute_type_color, PrimitiveWorkload::DUMMY_0);
+        PrimitiveWorkload::FilamentAttribute const fattr{VertexAttribute::COLOR, slotCount, true};
+        workload->attributesMap[cattr] = fattr;
     }
 
     int numUvSets = getNumUvSets(outPrim->uvmap);
     if (!hasUv0 && numUvSets > 0) {
-        needsDummyData = true;
-        vbb.attribute(VertexAttribute::UV0, slot, VertexBuffer::AttributeType::USHORT2);
-        vbb.normalized(VertexAttribute::UV0);
-        slog.w << "Missing UV0 data in " << name << io::endl;
+        PrimitiveWorkload::Attribute cattr =
+                std::make_pair(cgltf_attribute_type_texcoord, PrimitiveWorkload::DUMMY_0);
+        PrimitiveWorkload::FilamentAttribute const fattr{VertexAttribute::UV0, slotCount, true};
     }
 
     if (!hasUv1 && numUvSets > 1) {
-        needsDummyData = true;
-        vbb.attribute(VertexAttribute::UV1, slot, VertexBuffer::AttributeType::USHORT2);
-        vbb.normalized(VertexAttribute::UV1);
+        PrimitiveWorkload::Attribute cattr =
+                std::make_pair(cgltf_attribute_type_texcoord, PrimitiveWorkload::DUMMY_1);
+        PrimitiveWorkload::FilamentAttribute const fattr{VertexAttribute::UV1, slotCount, true};
         slog.w << "Missing UV1 data in " << name << io::endl;
     }
 
-    vbb.bufferCount(needsDummyData ? slot + 1 : slot);
+    //  if (needsDummyData) {
+    //      producer->setDummyObjectSlot(slotCount);
+    //      //   TODO: create dummy object
+    //     const uint32_t requiredSize = sizeof(ubyte4) * vertexCount;
+    //     if (mDummyBufferObject == nullptr || requiredSize > mDummyBufferObject->getByteCount()) {
+    //         mDummyBufferObject = BufferObject::Builder().size(requiredSize).build(mEngine);
+    //         fAsset->mBufferObjects.push_back(mDummyBufferObject);
+    //         uint32_t* dummyData = (uint32_t*) malloc(requiredSize);
+    //         memset(dummyData, 0xff, requiredSize);
+    //         VertexBuffer::BufferDescriptor bd(dummyData, requiredSize, FREE_CALLBACK);
+    //         mDummyBufferObject->setBuffer(mEngine, std::move(bd));
+    //     }
+    //     vertices->setBufferObjectAt(mEngine, slot, mDummyBufferObject);
+    // }
 
-    VertexBuffer* vertices = vbb.build(mEngine);
-
-    outPrim->indices = indices;
-    outPrim->vertices = vertices;
-    fAsset->mPrimitives.push_back({&inPrim, vertices});
-    fAsset->mVertexBuffers.push_back(vertices);
-
-    for (size_t i = firstSlot; i < fAsset->mBufferSlots.size(); ++i) {
-        fAsset->mBufferSlots[i].vertexBuffer = vertices;
-    }
-
-    if (targetsCount > 0) {
-        MorphTargetBuffer* targets = MorphTargetBuffer::Builder()
-                .vertexCount(vertexCount)
-                .count(targetsCount)
-                .build(mEngine);
-        outPrim->targets = targets;
-        fAsset->mMorphTargetBuffers.push_back(targets);
-        UTILS_UNUSED_IN_RELEASE cgltf_accessor const* previous = nullptr;
-        for (int tindex = 0; tindex < targetsCount; ++tindex) {
-            const cgltf_morph_target& inTarget = inPrim.targets[tindex];
-            for (cgltf_size aindex = 0; aindex < inTarget.attributes_count; ++aindex) {
-                const cgltf_attribute& attribute = inTarget.attributes[aindex];
-                const cgltf_accessor* accessor = attribute.data;
-                const cgltf_attribute_type atype = attribute.type;
-                if (atype == cgltf_attribute_type_position) {
-                    // All position attributes must have the same number of components.
-                    assert_invariant(!previous || previous->type == accessor->type);
-                    previous = accessor;
-                    BufferSlot slot = { accessor };
-                    slot.morphTargetBuffer = targets;
-                    slot.bufferIndex = tindex;
-                    addBufferSlot(slot);
-                    break;
-                }
-            }
-        }
-    }
-
-    if (needsDummyData) {
-        const uint32_t requiredSize = sizeof(ubyte4) * vertexCount;
-        if (mDummyBufferObject == nullptr || requiredSize > mDummyBufferObject->getByteCount()) {
-            mDummyBufferObject = BufferObject::Builder().size(requiredSize).build(mEngine);
-            fAsset->mBufferObjects.push_back(mDummyBufferObject);
-            uint32_t* dummyData = (uint32_t*) malloc(requiredSize);
-            memset(dummyData, 0xff, requiredSize);
-            VertexBuffer::BufferDescriptor bd(dummyData, requiredSize, FREE_CALLBACK);
-            mDummyBufferObject->setBuffer(mEngine, std::move(bd));
-        }
-        vertices->setBufferObjectAt(mEngine, slot, mDummyBufferObject);
-    }
+    fAsset->mPrimitiveWorkloads.push_back(workload);
 
     return true;
 }

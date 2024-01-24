@@ -14,18 +14,20 @@
  * limitations under the License.
  */
 
+#include "FFilamentAsset.h"
+
 #include <cgltf.h>
 
 #include <math/vec4.h>
 
-namespace filament {
-
-class VertexBuffer;
-class MorphTargetBuffer;
-
-}
+#include <memory>
+#include <unordered_map>
 
 namespace filament::gltfio {
+
+struct VertexBufferProducer;
+struct MorphTargetBufferProducer;
+struct IndexBufferProducer;
 
 /**
  * Internal helper that examines a cgltf primitive and generates data suitable for Filament's
@@ -35,26 +37,40 @@ namespace filament::gltfio {
 struct TangentsJob {
     static constexpr int kMorphTargetUnused = -1;
 
+    using Attribute = PrimitiveWorkload::Attribute;
+    using FilamentAttribute = PrimitiveWorkload::FilamentAttribute;
+
     // The inputs to the procedure. The prim is owned by the client, which should ensure that it
     // stays alive for the duration of the procedure.
     struct InputParams {
         const cgltf_primitive* prim;
-        const int morphTargetIndex = kMorphTargetUnused;
+        std::unordered_map<Attribute, FilamentAttribute> attributesMap;
+        int morphTargetIndex = kMorphTargetUnused;
+        bool generateFlatNormals = false;
     };
 
     // The context of the procedure. These fields are not used by the procedure but are provided as
     // a convenience to clients. You can think of this as a scratch space for clients.
     struct Context {
-        VertexBuffer* const vb;
-        MorphTargetBuffer* const tb;
-        const uint8_t slot;
+        std::shared_ptr<VertexBufferProducer> vertices;
+        std::shared_ptr<MorphTargetBufferProducer> targets;
+        std::shared_ptr<IndexBufferProducer> indices;
     };
 
     // The outputs of the procedure. The results array gets malloc'd by the procedure, so clients
     // should remember to free it.
     struct OutputParams {
-        cgltf_size vertexCount;
-        math::short4* results;
+        cgltf_size triangleCount = 0;
+        math::uint3* triangles = nullptr;
+
+        cgltf_size vertexCount = 0;
+        math::short4* tangents = nullptr;
+        math::float2* uv0 = nullptr;
+        math::float2* uv1 = nullptr;
+        math::float3* positions = nullptr;
+        math::ushort4* joints = nullptr;
+        math::float4* weights = nullptr;
+        math::float4* colors = nullptr;
     };
 
     // Clients might want to track the jobs in an array, so the arguments are bundled into a struct.

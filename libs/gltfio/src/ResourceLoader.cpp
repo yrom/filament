@@ -50,6 +50,8 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <unordered_set>
+#include <utility>
 
 using namespace filament;
 using namespace filament::math;
@@ -100,7 +102,7 @@ struct ResourceLoader::Impl {
     size_t mRemainingTextureDownloads = 0;
 
     void addResourceData(const char* uri, BufferDescriptor&& buffer);
-    void computeTangents(FFilamentAsset* asset);
+    void runPrimitiveWorkloads(FFilamentAsset* asset);
     void createTextures(FFilamentAsset* asset, bool async);
     void cancelTextureDecoding();
     std::pair<Texture*, CacheResult> getOrCreateTexture(FFilamentAsset* asset, size_t textureIndex,
@@ -167,6 +169,11 @@ static bool requiresPacking(const cgltf_accessor* accessor) {
 }
 
 static void decodeDracoMeshes(FFilamentAsset* asset) {
+    std::unordered_set<cgltf_primitive const*> primitives;
+    for (auto workload : asset->mPrimitiveWorkloads) {
+        primitives.insert(workload->primitive);
+    }
+
     DracoCache* dracoCache = &asset->mSourceAsset->dracoCache;
 
     // For a given primitive and attribute, find the corresponding accessor.
@@ -181,7 +188,7 @@ static void decodeDracoMeshes(FFilamentAsset* asset) {
     };
 
     // Go through every primitive and check if it has a Draco mesh.
-    for (auto& [prim, vertexBuffer] : asset->mPrimitives) {
+    for (auto prim : primitives) {
         if (!prim->has_draco_mesh_compression) {
             continue;
         }
@@ -195,13 +202,11 @@ static void decodeDracoMeshes(FFilamentAsset* asset) {
         DracoMesh* mesh = dracoCache->findOrCreateMesh(draco.buffer_view);
         if (!mesh) {
             slog.e << "Cannot decompress mesh, Draco decoding error." << io::endl;
-            vertexBuffer = nullptr;
             continue;
         }
 
         // Copy over the decompressed data, converting the data type if necessary.
         if (prim->indices && !mesh->getFaceIndices(prim->indices)) {
-            vertexBuffer = nullptr;
             continue;
         }
 
@@ -222,7 +227,6 @@ static void decodeDracoMeshes(FFilamentAsset* asset) {
 
             // Copy over the decompressed data, converting the data type if necessary.
             if (!mesh->getVertexAttributes(id, accessor)) {
-                vertexBuffer = nullptr;
                 break;
             }
         }
@@ -463,6 +467,7 @@ bool ResourceLoader::loadResources(FFilamentAsset* asset, bool async) {
         return false;
     }
     #endif
+
     // Decompress Draco meshes early on, which allows us to exploit subsequent processing such as
     // tangent generation.
     decodeDracoMeshes(asset);
@@ -507,91 +512,88 @@ bool ResourceLoader::loadResources(FFilamentAsset* asset, bool async) {
     Engine& engine = *pImpl->mEngine;
 
     // Upload VertexBuffer and IndexBuffer data to the GPU.
-    for (auto slot : asset->mBufferSlots) {
-        const cgltf_accessor* accessor = slot.accessor;
-        if (!accessor->buffer_view) {
-            continue;
-        }
-        const uint8_t* bufferData = nullptr;
-        const uint8_t* data = nullptr;
-        if (accessor->buffer_view->has_meshopt_compression) {
-            bufferData = (const uint8_t*) accessor->buffer_view->data;
-            data = bufferData + accessor->offset;
-        } else {
-            bufferData = (const uint8_t*) accessor->buffer_view->buffer->data;
-            data = computeBindingOffset(accessor) + bufferData;
-        }
-        assert_invariant(bufferData);
-        const uint32_t size = computeBindingSize(accessor);
-        if (slot.vertexBuffer) {
-            if (requiresConversion(accessor)) {
-                const size_t floatsCount = accessor->count * cgltf_num_components(accessor->type);
-                const size_t floatsByteCount = sizeof(float) * floatsCount;
-                float* floatsData = (float*) malloc(floatsByteCount);
-                cgltf_accessor_unpack_floats(accessor, floatsData, floatsCount);
-                BufferObject* bo = BufferObject::Builder().size(floatsByteCount).build(engine);
-                asset->mBufferObjects.push_back(bo);
-                bo->setBuffer(engine, BufferDescriptor(floatsData, floatsByteCount, FREE_CALLBACK));
-                slot.vertexBuffer->setBufferObjectAt(engine, slot.bufferIndex, bo);
-                continue;
-            }
-            BufferObject* bo = BufferObject::Builder().size(size).build(engine);
-            asset->mBufferObjects.push_back(bo);
-            bo->setBuffer(engine, BufferDescriptor(data, size,
-                    uploadCallback, uploadUserdata(asset, pImpl->mUriDataCache)));
-            slot.vertexBuffer->setBufferObjectAt(engine, slot.bufferIndex, bo);
-            continue;
-        } else if (slot.indexBuffer) {
-            if (accessor->component_type == cgltf_component_type_r_8u) {
-                const size_t size16 = size * 2;
-                uint16_t* data16 = (uint16_t*) malloc(size16);
-                convertBytesToShorts(data16, data, size);
-                IndexBuffer::BufferDescriptor bd(data16, size16, FREE_CALLBACK);
-                slot.indexBuffer->setBuffer(engine, std::move(bd));
-                continue;
-            }
-            IndexBuffer::BufferDescriptor bd(data, size, uploadCallback,
-                    uploadUserdata(asset, pImpl->mUriDataCache));
-            slot.indexBuffer->setBuffer(engine, std::move(bd));
-            continue;
-        }
+    // for (auto slot : asset->mBufferSlots) {
+    //     const cgltf_accessor* accessor = slot.accessor;
+    //     if (!accessor->buffer_view) {
+    //         continue;
+    //     }
+    //     const uint8_t* bufferData = nullptr;
+    //     const uint8_t* data = nullptr;
+    //     if (accessor->buffer_view->has_meshopt_compression) {
+    //         bufferData = (const uint8_t*) accessor->buffer_view->data;
+    //         data = bufferData + accessor->offset;
+    //     } else {
+    //         bufferData = (const uint8_t*) accessor->buffer_view->buffer->data;
+    //         data = computeBindingOffset(accessor) + bufferData;
+    //     }
+    //     assert_invariant(bufferData);
+    //     const uint32_t size = computeBindingSize(accessor);
+    //     if (slot.vertexBuffer) {
+    //         if (requiresConversion(accessor)) {
+    //             const size_t floatsCount = accessor->count * cgltf_num_components(accessor->type);
+    //             const size_t floatsByteCount = sizeof(float) * floatsCount;
+    //             float* floatsData = (float*) malloc(floatsByteCount);
+    //             cgltf_accessor_unpack_floats(accessor, floatsData, floatsCount);
+    //             BufferObject* bo = BufferObject::Builder().size(floatsByteCount).build(engine);
+    //             asset->mBufferObjects.push_back(bo);
+    //             bo->setBuffer(engine, BufferDescriptor(floatsData, floatsByteCount, FREE_CALLBACK));
+    //             slot.vertexBuffer->setBufferObjectAt(engine, slot.bufferIndex, bo);
+    //             continue;
+    //         }
+    //         BufferObject* bo = BufferObject::Builder().size(size).build(engine);
+    //         asset->mBufferObjects.push_back(bo);
+    //         bo->setBuffer(engine, BufferDescriptor(data, size,
+    //                 uploadCallback, uploadUserdata(asset, pImpl->mUriDataCache)));
+    //         slot.vertexBuffer->setBufferObjectAt(engine, slot.bufferIndex, bo);
+    //         continue;
+    //     } else if (slot.indexBuffer) {
+    //         if (accessor->component_type == cgltf_component_type_r_8u) {
+    //             const size_t size16 = size * 2;
+    //             uint16_t* data16 = (uint16_t*) malloc(size16);
+    //             convertBytesToShorts(data16, data, size);
+    //             IndexBuffer::BufferDescriptor bd(data16, size16, FREE_CALLBACK);
+    //             slot.indexBuffer->setBuffer(engine, std::move(bd));
+    //             continue;
+    //         }
+    //         IndexBuffer::BufferDescriptor bd(data, size, uploadCallback,
+    //                 uploadUserdata(asset, pImpl->mUriDataCache));
+    //         slot.indexBuffer->setBuffer(engine, std::move(bd));
+    //         continue;
+    //     }
 
-        // If the buffer slot does not have an associated VertexBuffer or IndexBuffer, then this
-        // must be a morph target.
-        assert(slot.morphTargetBuffer);
+    //     // If the buffer slot does not have an associated VertexBuffer or IndexBuffer, then this
+    //     // must be a morph target.
+    //     assert(slot.morphTargetBuffer);
 
-        if (requiresPacking(accessor)) {
-            const size_t floatsCount = accessor->count * cgltf_num_components(accessor->type);
-            const size_t floatsByteCount = sizeof(float) * floatsCount;
-            float* floatsData = (float*) malloc(floatsByteCount);
-            cgltf_accessor_unpack_floats(accessor, floatsData, floatsCount);
-            if (accessor->type == cgltf_type_vec3) {
-                slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
-                        (const float3*) floatsData, slot.morphTargetBuffer->getVertexCount());
-            } else {
-                slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
-                        (const float4*) data, slot.morphTargetBuffer->getVertexCount());
-            }
-            free(floatsData);
-            continue;
-        }
+    //     if (requiresPacking(accessor)) {
+    //         const size_t floatsCount = accessor->count * cgltf_num_components(accessor->type);
+    //         const size_t floatsByteCount = sizeof(float) * floatsCount;
+    //         float* floatsData = (float*) malloc(floatsByteCount);
+    //         cgltf_accessor_unpack_floats(accessor, floatsData, floatsCount);
+    //         if (accessor->type == cgltf_type_vec3) {
+    //             slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
+    //                     (const float3*) floatsData, slot.morphTargetBuffer->getVertexCount());
+    //         } else {
+    //             slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
+    //                     (const float4*) data, slot.morphTargetBuffer->getVertexCount());
+    //         }
+    //         free(floatsData);
+    //         continue;
+    //     }
 
-        if (accessor->type == cgltf_type_vec3) {
-            slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
-                    (const float3*) data, slot.morphTargetBuffer->getVertexCount());
-        } else {
-            assert_invariant(accessor->type == cgltf_type_vec4);
-            slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
-                    (const float4*) data, slot.morphTargetBuffer->getVertexCount());
-        }
-    }
+    //     if (accessor->type == cgltf_type_vec3) {
+    //         slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
+    //                 (const float3*) data, slot.morphTargetBuffer->getVertexCount());
+    //     } else {
+    //         assert_invariant(accessor->type == cgltf_type_vec4);
+    //         slot.morphTargetBuffer->setPositionsAt(engine, slot.bufferIndex,
+    //                 (const float4*) data, slot.morphTargetBuffer->getVertexCount());
+    //     }
+    // }
 
     // Compute surface orientation quaternions if necessary. This is similar to sparse data in that
     // we need to generate the contents of a GPU buffer by processing one or more CPU buffer(s).
-    pImpl->computeTangents(asset);
-
-    asset->mBufferSlots = {};
-    asset->mPrimitives = {};
+    pImpl->runPrimitiveWorkloads(asset);
 
     // If any decoding jobs are still underway from a previous load, wait for them to finish.
     for (const auto& iter : pImpl->mTextureProviders) {
@@ -807,92 +809,98 @@ void ResourceLoader::Impl::createTextures(FFilamentAsset* asset, bool async) {
     }
 }
 
-void ResourceLoader::Impl::computeTangents(FFilamentAsset* asset) {
+void ResourceLoader::Impl::runPrimitiveWorkloads(FFilamentAsset* asset) {
     SYSTRACE_CALL();
 
-    const cgltf_accessor* kGenerateTangents = &asset->mGenerateTangents;
-    const cgltf_accessor* kGenerateNormals = &asset->mGenerateNormals;
+    using Params = TangentsJob::Params;
+    using Key = std::pair<cgltf_primitive const*, int>;
 
-    // Collect all TANGENT vertex attribute slots that need to be populated.
-    tsl::robin_map<VertexBuffer*, uint8_t> baseTangents;
-    for (auto slot : asset->mBufferSlots) {
-        if (slot.accessor != kGenerateTangents && slot.accessor != kGenerateNormals) {
-            continue;
-        }
-        baseTangents[slot.vertexBuffer] = slot.bufferIndex;
-    }
+    // TODO: This should be a pair of primitive and morphtargetIndex.
+    std::unordered_map<TangentsJob::InputParams, Params> primitives;
 
     // Create a job description for each triangle-based primitive.
-    using Params = TangentsJob::Params;
-    std::vector<Params> jobParams;
-    for (auto [prim, vb] : asset->mPrimitives) {
-        if (UTILS_UNLIKELY(prim->type != cgltf_primitive_type_triangles)) {
-            continue;
-        }
-        auto iter = baseTangents.find(vb);
-        if (iter != baseTangents.end()) {
-            jobParams.emplace_back(Params {{ prim }, {vb, nullptr, iter->second }});
-        }
-    }
+    // Collect all TANGENT vertex attribute slots that need to be populated.
+    for (auto workload: asset->mPrimitiveWorkloads) {
+        cgltf_primitive const* prim = workload->primitive;
 
-    // Create a job description for morph targets.
-    for (size_t i = 0, n = asset->mSourceAsset->hierarchy->meshes_count; i < n; ++i) {
-        const cgltf_mesh& mesh = asset->mSourceAsset->hierarchy->meshes[i];
-        const FixedCapacityVector<Primitive>& prims = asset->mMeshCache[i];
-        if (0 == mesh.weights_count) {
-            continue;
+        if (workload->vertices) {
+
         }
-        for (cgltf_size pindex = 0, pcount = mesh.primitives_count; pindex < pcount; ++pindex) {
-            const cgltf_primitive& prim = mesh.primitives[pindex];
-            MorphTargetBuffer* tb = prims[pindex].targets;
-            for (cgltf_size tindex = 0, tcount = prim.targets_count; tindex < tcount; ++tindex) {
-                const cgltf_morph_target& target = prim.targets[tindex];
-                bool hasNormals = false;
-                for (cgltf_size aindex = 0; aindex < target.attributes_count; aindex++) {
-                    const cgltf_attribute& attribute = target.attributes[aindex];
-                    const cgltf_attribute_type atype = attribute.type;
-                    if (atype != cgltf_attribute_type_tangent) {
-                        continue;
-                    }
-                    hasNormals = true;
-                    jobParams.emplace_back(Params { { &prim, (int) tindex },
-                                                    { nullptr, tb, (uint8_t) pindex } });
-                    break;
-                }
-                // Generate flat normals if necessary.
-                if (!hasNormals && prim.material && !prim.material->unlit) {
-                    jobParams.emplace_back(Params { { &prim, (int) tindex },
-                                                    { nullptr, tb, (uint8_t) pindex } });
-                }
+
+        if (workload->indices) {
+
+        }
+
+        if (workload->targets) {
+
+        }
+
+        PrimitiveWorkload::Producer& producer = workload->producer;
+        if (std::holds_alternative<IndexBufferProducerPtr>(producer)) {
+            TangentsJob::InputParams key {prim, TangentsJob::kMorphTargetUnused};
+            auto result = primitives.find(key);
+            if (result == primitives.end()) {
+                result = primitives.emplace(key, Params {{nullptr}, {nullptr}}).first;
             }
+            auto& params = result->second;
+            params.in = key;
+            params.context.indices = std::get<IndexBufferProducerPtr>(producer);
+        } else if (std::holds_alternative<VertexBufferProducerPtr>(producer)) {
+            TangentsJob::InputParams key {prim, TangentsJob::kMorphTargetUnused};
+            auto result = primitives.find(key);
+            if (result == primitives.end()) {
+                result = primitives.emplace(key , Params {{nullptr}, {nullptr}}).first;
+            }
+            auto& params = result->second;
+            params.in = key;
+            params.context.vertices = std::get<VertexBufferProducerPtr>(producer);
+        } else if (std::holds_alternative<MorphTargetBufferProducerPtr>(producer)) {
+            TangentsJob::InputParams key {prim, workload->targetIndex};
+            auto result = primitives.find(key);
+            if (result == primitives.end()) {
+                result = primitives.emplace(key , Params {{nullptr}, {nullptr}}).first;
+            }
+            auto& params = result->second;
+            params.in = key;
+            params.context.targets = std::get<MorphTargetBufferProducerPtr>(producer);
         }
     }
 
-    // Kick off jobs for computing tangent frames.
     JobSystem* js = &mEngine->getJobSystem();
     JobSystem::Job* parent = js->createJob();
-    for (Params& params : jobParams) {
-        Params* pptr = &params;
-        js->run(jobs::createJob(*js, parent, [pptr] { TangentsJob::run(pptr); }));
+    std::vector<Params> jobParams;
+    for (auto [key, params] : primitives) {
+        jobParams.emplace_back(Params{ key, params.context });
+        Params& param = jobParams.back();
+        js->run(jobs::createJob(*js, parent, [pptr = &param] { TangentsJob::run(pptr); }));
     }
     js->runAndWait(parent);
 
     // Finally, upload quaternions to the GPU from the main thread.
-    for (Params& params : jobParams) {
-        if (params.context.vb) {
+    for (Params& params: jobParams) {
+        if (params.context.vertices) {
             BufferObject* bo = BufferObject::Builder()
-                    .size(params.out.vertexCount * sizeof(short4)).build(*mEngine);
+                                       .size(params.out.vertexCount * sizeof(short4))
+                                       .build(*mEngine);
             asset->mBufferObjects.push_back(bo);
-            bo->setBuffer(*mEngine, BufferDescriptor(
-                    params.out.results, bo->getByteCount(), FREE_CALLBACK));
-            params.context.vb->setBufferObjectAt(*mEngine, params.context.slot, bo);
-        } else {
-            assert_invariant(params.context.tb);
-            params.context.tb->setTangentsAt(*mEngine, params.in.morphTargetIndex,
-                    params.out.results, params.out.vertexCount);
+            bo->setBuffer(*mEngine,
+                    BufferDescriptor(params.out.tangents, bo->getByteCount(), FREE_CALLBACK));
+
+            params.context.vertices->count(params.out.vertexCount);
+            params.context.vertices->setBufferObjectAt(asset, mEngine, params.context.slot, bo);
+        }
+        if (params.context.indices) {
+            params.context.indices->count(params.out.triangleCount);
+            params.context.indices->setBuffer(asset, mEngine, params.out.triangles);
+        }
+        if (params.context.targets) {
+            params.context.targets->count(params.out.vertexCount);
+            params.context.targets->setTangentsAt(asset, mEngine, params.in.morphTargetIndex,
+                    params.out.results);
             free(params.out.results);
         }
     }
+    asset->mPrimitiveWorkloads.clear();
 }
 
 ResourceLoader::Impl::~Impl() {
