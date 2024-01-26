@@ -67,7 +67,7 @@ void unbind() {
     if (refcount == 1) {
         shutdownBinder();
 
-        for (unsigned int i = 0; i < 2574; i++) {
+        for (unsigned int i = 0; i < blueCoreNumFunctions; i++) {
             *g_gl_stubs[i].api_call = nullptr;
         }
     }
